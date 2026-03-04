@@ -6,12 +6,12 @@
 
 ## Installation
 
-CRCForge is now packaged as a standard Python CLI. It currently uses only Python's standard library at runtime, so there are no third-party runtime dependencies to install.
+CRCForge is packaged as a standard Python CLI. It currently uses only Python's standard library at runtime, so there are no third-party runtime dependencies to install.
 
 Basic setup:
 
 ```powershell
-git clone <your-repo-url>
+git clone <this-repo-url>
 cd crcforge
 python -m pip install -e .
 crcforge
@@ -34,17 +34,6 @@ python -m crcforge
 ```
 
 Running either entrypoint without a subcommand prints the built-in help screen.
-
-## Build A Package
-
-To build distributable artifacts:
-
-```powershell
-python -m pip install -r requirements-dev.txt
-python -m build
-```
-
-This produces a source distribution and a wheel in `dist/`.
 
 ## What CRCForge Is For
 
