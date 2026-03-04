@@ -280,6 +280,29 @@ Use `brute` when:
 
 Use `transform` when you only want to normalize or inspect byte order.
 
+`transform` accepts the same input forms as the CRC commands, so it is useful as a quick "what bytes am I actually testing?" sanity check before running `calc`, `find`, or `brute`.
+
+Input handling:
+
+- values starting with `0x` are parsed as raw hex bytes
+- values starting with `0b` are parsed as raw binary bytes
+- all other values are treated as UTF-8 text
+- `--as-file` reads raw bytes directly from a file path
+- `--as-text` forces plain text mode even if the value starts with `0x` or `0b`
+
+Data rules:
+
+- hex input must contain a full number of bytes, so it needs an even number of hex digits
+- binary input must contain full bytes, so its bit count must be divisible by 8
+- spaces and underscores inside hex and binary literals are normalized before parsing
+- plain text is encoded as UTF-8 before the byte-order transform is applied
+
+Output handling:
+
+- default output is spaced hex, such as `41 42 43 44`
+- `--output-format compact-hex` prints compact uppercase hex, such as `41424344`
+- `--output-format text` decodes the transformed bytes as UTF-8 and replaces invalid bytes if needed
+
 Examples:
 
 ```powershell
@@ -287,7 +310,16 @@ python crcforge.py transform 0xA9BB7BFD --byte-order swap32
 python crcforge.py transform 0x12345678 --byte-order reverse
 python crcforge.py transform 0x48656C6C6F --output-format text
 python crcforge.py transform 0b0100000101000010 --output-format text
+python crcforge.py transform demo.bin --as-file --byte-order swap16
+python crcforge.py transform 0x48656C6C6F --as-text
 ```
+
+What these mean:
+
+- `0xA9BB7BFD` is interpreted as four bytes: `A9 BB 7B FD`
+- `0b0100000101000010` is interpreted as two bytes: `41 42`, which renders as `AB` in text output
+- `demo.bin --as-file` loads the file contents exactly as stored on disk
+- `0x48656C6C6F --as-text` treats the literal characters `0x48656C6C6F` as text, not as hex bytes
 
 This is useful for:
 
@@ -343,6 +375,29 @@ CRCForge supports these input transforms:
 - `swap32`: reverse bytes inside each 4-byte word
 - `swap64`: reverse bytes inside each 8-byte word
 
+Example using `0x11223344`:
+
+- `native` -> `11 22 33 44`
+- `reverse` -> `44 33 22 11`
+- `swap16` -> `22 11 44 33`
+- `swap32` -> `44 33 22 11`
+
+On a single 4-byte value, `reverse` and `swap32` can look identical. The difference becomes clearer on longer inputs.
+
+Example using `0x1122334455667788`:
+
+- `native` -> `11 22 33 44 55 66 77 88`
+- `reverse` -> `88 77 66 55 44 33 22 11`
+- `swap16` -> `22 11 44 33 66 55 88 77`
+- `swap32` -> `44 33 22 11 88 77 66 55`
+- `swap64` -> `88 77 66 55 44 33 22 11`
+
+Practical endianness examples:
+
+- a 16-bit field documented as `0x1234` may be transmitted as bytes `34 12`; `swap16` corrects that
+- a 32-bit value `0xA1B2C3D4` stored little-endian may appear as `D4 C3 B2 A1`; `swap32` corrects that
+- if an entire payload was captured in reverse order, `reverse` tests that case directly
+
 Alignment rules:
 
 - `swap16` requires input length divisible by 2
@@ -355,6 +410,11 @@ CRCForge also distinguishes two different swap problems:
 
 - `input` swap: the payload bytes are arranged in the wrong byte order
 - `crc` swap: the checksum bytes themselves are byte-swapped, such as `0x471A` vs `0x1A47`
+
+That distinction matters:
+
+- if the payload is wrong, you need to transform the input bytes before calculating or matching the CRC
+- if only the checksum is wrong, the payload may already be correct and only the reported CRC bytes need swapping
 
 ## Output Style
 
