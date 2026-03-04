@@ -3,8 +3,6 @@
 
 **CRCForge** is a Swiss Army knife for CRC tasks, built for reverse engineers, protocol analysts, firmware researchers, and anyone who needs to identify, verify, or brute-force CRC behavior from raw data. It combines CRC calculation, algorithm discovery, byte-order testing, checksum byte-swap detection, and custom parameter brute-force in one CLI, so you can move from "I have bytes and a checksum" to "I know exactly how this CRC was produced" without jumping between multiple scripts.
 
-Created by Fatih Kayran.
-
 ## Installation
 
 CRCForge is a single-file Python CLI. It currently uses only Python's standard library, so there are no third-party runtime dependencies to install.
@@ -382,4 +380,5 @@ This is intentional. The tool is meant to be useful during active reverse-engine
 
 ## Connect
 
+Fatih Kayran
 X/Twitter: https://x.com/kayranfatih
