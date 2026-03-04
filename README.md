@@ -1,19 +1,9 @@
-# CRCForge
 
-```text
-+-----------------------------------------------------------+
-|   ____ ____   ____ _____ ___  ____   ____ _____           |
-|  / ___|  _ \ / ___|  ___/ _ \|  _ \ / ___| ____|          |
-| | |   | |_) | |   | |_ | | | | |_) | |  _|  _|            |
-| | |___|  _ <| |___|  _|| |_| |  _ <| |_| | |___           |
-|  \____|_| \_\\____|_|   \___/|_| \_\\____|_____|          |
-|                                                           |
-+-----------------------------------------------------------+
-by Fatih Kayran
-X/Twitter: @kayranfatih
-```
+![CRCForge logo](crcforge_logo.png)
 
-`CRCForge` is a Swiss Army knife for CRC tasks, built for reverse engineers, protocol analysts, firmware researchers, and anyone who needs to identify, verify, or brute-force CRC behavior from raw data. It combines CRC calculation, algorithm discovery, byte-order testing, checksum byte-swap detection, and custom parameter brute-force in one CLI, so you can move from "I have bytes and a checksum" to "I know exactly how this CRC was produced" without jumping between multiple scripts.
+**CRCForge** is a Swiss Army knife for CRC tasks, built for reverse engineers, protocol analysts, firmware researchers, and anyone who needs to identify, verify, or brute-force CRC behavior from raw data. It combines CRC calculation, algorithm discovery, byte-order testing, checksum byte-swap detection, and custom parameter brute-force in one CLI, so you can move from "I have bytes and a checksum" to "I know exactly how this CRC was produced" without jumping between multiple scripts.
+
+Created by Fatih Kayran.
 
 ## Installation
 
@@ -389,3 +379,7 @@ This is intentional. The tool is meant to be useful during active reverse-engine
 - `--progress-interval` controls how often long custom brute scans report progress.
 - aliases let you search common CRC names even when several names resolve to the same underlying parameter set.
 - if you are unsure whether the problem is the payload layout or the checksum layout, use `find --scan-byte-order` or `brute` first.
+
+## Connect
+
+X/Twitter: https://x.com/kayranfatih
