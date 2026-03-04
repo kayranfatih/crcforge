@@ -9,7 +9,7 @@ CRCForge is a single-file Python CLI. It currently uses only Python's standard l
 Basic setup:
 
 ```powershell
-git clone <your-repo-url>
+git clone <repo-url>
 cd CRC-forcer
 python -m pip install -r requirements.txt
 python crcforge.py
