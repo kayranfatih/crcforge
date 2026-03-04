@@ -1,0 +1,3 @@
+# CRCForge currently uses only Python's standard library.
+# There are no third-party runtime dependencies to install.
+# `pip install -r requirements.txt` is optional and will not install extra packages.
