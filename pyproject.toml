@@ -1,0 +1,24 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "crcforge"
+version = "0.1.0"
+description = "CLI for CRC calculation, discovery, byte-order transforms, and brute-force analysis."
+readme = "README.md"
+requires-python = ">=3.9"
+license = { file = "LICENSE" }
+authors = [
+  { name = "Fatih Kayran" }
+]
+dependencies = []
+
+[project.scripts]
+crcforge = "crcforge.cli:main"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]

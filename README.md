@@ -1,3 +1,4 @@
+﻿# CRCForge
 
 ![CRCForge logo](crcforge_logo.png)
 
@@ -5,33 +6,45 @@
 
 ## Installation
 
-CRCForge is a single-file Python CLI. It currently uses only Python's standard library, so there are no third-party runtime dependencies to install.
+CRCForge is now packaged as a standard Python CLI. It currently uses only Python's standard library at runtime, so there are no third-party runtime dependencies to install.
 
 Basic setup:
 
 ```powershell
 git clone <your-repo-url>
-cd CRC-forcer
-python -m pip install -r requirements.txt
-python crcforge.py
+cd crcforge
+python -m pip install -e .
+crcforge
 ```
 
 What this does:
 
 - clones the repository
 - enters the project directory
-- runs the standard `requirements.txt` install step for consistency
-- opens the built-in help screen
+- installs the package in editable mode
+- exposes the `crcforge` command on your active Python environment
 
-`requirements.txt` is currently a compatibility placeholder because the tool has no external runtime packages. Running the install step is still fine and keeps the project ready if dependencies are added later.
+For a local checkout without installation, `python crcforge.py` still works as a compatibility wrapper.
 
-Everything runs from one entrypoint:
+Primary entrypoints:
 
 ```powershell
-python crcforge.py
+crcforge
+python -m crcforge
 ```
 
-Running it without a subcommand prints the built-in help screen.
+Running either entrypoint without a subcommand prints the built-in help screen.
+
+## Build A Package
+
+To build distributable artifacts:
+
+```powershell
+python -m pip install -r requirements-dev.txt
+python -m build
+```
+
+This produces a source distribution and a wheel in `dist/`.
 
 ## What CRCForge Is For
 
@@ -84,7 +97,7 @@ frame_header_v2
 Example:
 
 ```powershell
-python crcforge.py calc crc-16-modbus 0x313233343536373839
+crcforge calc crc-16-modbus 0x313233343536373839
 ```
 
 This uses the raw hex byte stream:
@@ -102,7 +115,7 @@ Those bytes are hexadecimal values, and in ASCII they decode to:
 While this:
 
 ```powershell
-python crcforge.py calc crc-16-modbus 123456789
+crcforge calc crc-16-modbus 123456789
 ```
 
 uses the UTF-8 text bytes of `123456789`.
@@ -133,25 +146,25 @@ This distinction is deliberate. A payload like `123456789` is usually meaningful
 Calculate a known CRC:
 
 ```powershell
-python crcforge.py calc crc-16-modbus 123456789
+crcforge calc crc-16-modbus 123456789
 ```
 
 Find which built-in CRC matches a payload and checksum:
 
 ```powershell
-python crcforge.py find 0x4B37 123456789 --width 16
+crcforge find 0x4B37 123456789 --width 16
 ```
 
 Brute-force across the full built-in catalog and all byte-order modes:
 
 ```powershell
-python crcforge.py brute 0x1A47 firmware_block_01 --width 16
+crcforge brute 0x1A47 firmware_block_01 --width 16
 ```
 
 Transform payload bytes without doing any CRC work:
 
 ```powershell
-python crcforge.py transform 0xA9BB7BFD --byte-order swap32
+crcforge transform 0xA9BB7BFD --byte-order swap32
 ```
 
 ## Command Reference
@@ -163,17 +176,17 @@ Use `calc` when you already know the CRC algorithm, or when you want to test one
 Built-in algorithm mode:
 
 ```powershell
-python crcforge.py calc crc-16-modbus 0x313233343536373839
-python crcforge.py calc crc-16-modbus 123456789
-python crcforge.py calc crc-16-modbus 0b001100010011001000110011001101000011010100110110001101110011100000111001
-python crcforge.py calc 123456789 --algorithm crc-16-modbus
+crcforge calc crc-16-modbus 0x313233343536373839
+crcforge calc crc-16-modbus 123456789
+crcforge calc crc-16-modbus 0b001100010011001000110011001101000011010100110110001101110011100000111001
+crcforge calc 123456789 --algorithm crc-16-modbus
 ```
 
 Custom parameter mode:
 
 ```powershell
-python crcforge.py calc 123456789 --width 16 --poly 0x1021 --init 0xFFFF --refin false --refout false
-python crcforge.py calc 0x313233343536373839 --width 82 --poly 0x0308C0111011401440411 --init 0x0 --xor-out 0x0 --refin true --refout true
+crcforge calc 123456789 --width 16 --poly 0x1021 --init 0xFFFF --refin false --refout false
+crcforge calc 0x313233343536373839 --width 82 --poly 0x0308C0111011401440411 --init 0x0 --xor-out 0x0 --refin true --refout true
 ```
 
 Use `calc` when:
@@ -189,10 +202,10 @@ Use `find` when you want to match a payload and checksum against the built-in ca
 Examples:
 
 ```powershell
-python crcforge.py find 0x4B37 0x313233343536373839 --width 16
-python crcforge.py find 19255 123456789 --width 16
-python crcforge.py find 0b0100101100110111 123456789 --width 16
-python crcforge.py find 0x1A47 packet_payload_v3 --width 16 --scan-byte-order
+crcforge find 0x4B37 0x313233343536373839 --width 16
+crcforge find 19255 123456789 --width 16
+crcforge find 0b0100101100110111 123456789 --width 16
+crcforge find 0x1A47 packet_payload_v3 --width 16 --scan-byte-order
 ```
 
 `find` can detect:
@@ -220,9 +233,9 @@ Without custom flags, `brute` scans:
 Examples:
 
 ```powershell
-python crcforge.py brute 0x4B37 0x313233343536373839
-python crcforge.py brute 0x4B37 123456789 --width 16
-python crcforge.py brute 0x1A47 packet_payload_v3 --width 16
+crcforge brute 0x4B37 0x313233343536373839
+crcforge brute 0x4B37 123456789 --width 16
+crcforge brute 0x1A47 packet_payload_v3 --width 16
 ```
 
 #### Custom brute-force
@@ -242,15 +255,15 @@ Custom brute can scan:
 Targeted custom brute examples:
 
 ```powershell
-python crcforge.py brute 0x29B1 123456789 --width 16 --poly 0x1021 --init 0xFFFF --refin false --refout false
-python crcforge.py brute 0x4B37 0x313233343536373839 --width 16 --poly 0x8005 --init 0x0000:0xFFFF --xor-out 0x0:0xFFFF
-python crcforge.py brute 0x906E 123456789 --width 16 --poly 0x1021,0x8005 --refin auto --refout auto
+crcforge brute 0x29B1 123456789 --width 16 --poly 0x1021 --init 0xFFFF --refin false --refout false
+crcforge brute 0x4B37 0x313233343536373839 --width 16 --poly 0x8005 --init 0x0000:0xFFFF --xor-out 0x0:0xFFFF
+crcforge brute 0x906E 123456789 --width 16 --poly 0x1021,0x8005 --refin auto --refout auto
 ```
 
 Full-range custom brute example:
 
 ```powershell
-python crcforge.py brute 0x4B37 123456789 --full-custom --max-combinations 100000
+crcforge brute 0x4B37 123456789 --full-custom --max-combinations 100000
 ```
 
 `--full-custom` behavior:
@@ -306,12 +319,12 @@ Output handling:
 Examples:
 
 ```powershell
-python crcforge.py transform 0xA9BB7BFD --byte-order swap32
-python crcforge.py transform 0x12345678 --byte-order reverse
-python crcforge.py transform 0x48656C6C6F --output-format text
-python crcforge.py transform 0b0100000101000010 --output-format text
-python crcforge.py transform demo.bin --as-file --byte-order swap16
-python crcforge.py transform 0x48656C6C6F --as-text
+crcforge transform 0xA9BB7BFD --byte-order swap32
+crcforge transform 0x12345678 --byte-order reverse
+crcforge transform 0x48656C6C6F --output-format text
+crcforge transform 0b0100000101000010 --output-format text
+crcforge transform demo.bin --as-file --byte-order swap16
+crcforge transform 0x48656C6C6F --as-text
 ```
 
 What these mean:
@@ -334,11 +347,11 @@ Use `list` to inspect the built-in CRC catalog.
 Examples:
 
 ```powershell
-python crcforge.py list
-python crcforge.py list --width 16
-python crcforge.py list --width 82
-python crcforge.py list --aliases
-python crcforge.py list --width 16 --aliases
+crcforge list
+crcforge list --width 16
+crcforge list --width 82
+crcforge list --aliases
+crcforge list --width 16 --aliases
 ```
 
 `list` now shows:
@@ -352,7 +365,7 @@ python crcforge.py list --width 16 --aliases
 Use `self-test` to validate the built-in catalog against the standard `123456789` check vectors.
 
 ```powershell
-python crcforge.py self-test
+crcforge self-test
 ```
 
 ### `banner`
@@ -360,7 +373,7 @@ python crcforge.py self-test
 Use `banner` to print the ASCII banner and credits.
 
 ```powershell
-python crcforge.py banner
+crcforge banner
 ```
 
 ## Byte Order / Endianness
@@ -442,3 +455,5 @@ This is intentional. The tool is meant to be useful during active reverse-engine
 
 Fatih Kayran
 X/Twitter: https://x.com/kayranfatih
+
+
