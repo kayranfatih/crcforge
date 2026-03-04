@@ -17,13 +17,6 @@ python -m pip install -e .
 crcforge
 ```
 
-What this does:
-
-- clones the repository
-- enters the project directory
-- installs the package in editable mode
-- exposes the `crcforge` command on your active Python environment
-
 For a local checkout without installation, `python crcforge.py` still works as a compatibility wrapper.
 
 Primary entrypoints:
@@ -418,19 +411,6 @@ That distinction matters:
 - if the payload is wrong, you need to transform the input bytes before calculating or matching the CRC
 - if only the checksum is wrong, the payload may already be correct and only the reported CRC bytes need swapping
 
-## Output Style
-
-CRCForge prints structured, labeled output for all major commands:
-
-- section headers
-- labeled fields
-- colored success, info, warning, and error lines on ANSI-capable terminals
-- explicit reporting of skipped byte-order modes
-- explicit reporting of checksum byte-swap matches
-- explicit reporting of inferred width in `--full-custom` mode
-
-This is intentional. The tool is meant to be useful during active reverse-engineering sessions, not just as a thin calculator.
-
 ## Practical Notes
 
 - `find` and built-in `brute` work against the built-in catalog.
@@ -440,8 +420,8 @@ This is intentional. The tool is meant to be useful during active reverse-engine
 - aliases let you search common CRC names even when several names resolve to the same underlying parameter set.
 - if you are unsure whether the problem is the payload layout or the checksum layout, use `find --scan-byte-order` or `brute` first.
 
-## Connect
+## Credits
 
 Fatih Kayran
-X/Twitter: https://x.com/kayranfatih
 
+X/Twitter: https://x.com/kayranfatih
