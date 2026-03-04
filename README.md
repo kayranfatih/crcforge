@@ -1,5 +1,17 @@
 # CRCForge
 
+```text
++-----------------------------------------------------------+
+|   ____ ____   ____ _____ ___  ____   ____ _____           |
+|  / ___|  _ \ / ___|  ___/ _ \|  _ \ / ___| ____|          |
+| | |   | |_) | |   | |_ | | | | |_) | |  _|  _|            |
+| | |___|  _ <| |___|  _|| |_| |  _ <| |_| | |___           |
+|  \____|_| \_\\____|_|   \___/|_| \_\\____|_____|          |
+|                                                           |
++-----------------------------------------------------------+
+by Fatih Kayran
+X/Twitter: @kayranfatih
+```
 
 `CRCForge` is a Swiss Army knife for CRC tasks, built for reverse engineers, protocol analysts, firmware researchers, and anyone who needs to identify, verify, or brute-force CRC behavior from raw data. It combines CRC calculation, algorithm discovery, byte-order testing, checksum byte-swap detection, and custom parameter brute-force in one CLI, so you can move from "I have bytes and a checksum" to "I know exactly how this CRC was produced" without jumping between multiple scripts.
 
@@ -10,7 +22,7 @@ CRCForge is a single-file Python CLI. It currently uses only Python's standard l
 Basic setup:
 
 ```powershell
-git clone <repo-url>
+git clone <your-repo-url>
 cd CRC-forcer
 python -m pip install -r requirements.txt
 python crcforge.py
@@ -87,10 +99,16 @@ Example:
 python crcforge.py calc crc-16-modbus 0x313233343536373839
 ```
 
-This uses the raw byte stream:
+This uses the raw hex byte stream:
 
 ```text
 31 32 33 34 35 36 37 38 39
+```
+
+Those bytes are hexadecimal values, and in ASCII they decode to:
+
+```text
+123456789
 ```
 
 While this:
@@ -109,8 +127,8 @@ Interpretation rules:
 
 - Starts with `0x` -> parsed as hexadecimal
 - Starts with `0b` -> parsed as binary
-- Plain digits -> parsed as decimal
-- Hex without `0x` is rejected on purpose
+- Plain digits without a prefix -> parsed as decimal
+- Values containing hex letters (`A-F`) without `0x` are rejected on purpose
 
 Valid examples:
 
