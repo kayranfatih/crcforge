@@ -9,7 +9,9 @@ from typing import List, Optional, Sequence, Tuple
 
 from . import io as io_helpers
 from .algorithms import (
+    ComplementChecksum,
     CrcAlgorithm,
+    calculate_checksum,
     calculate_crc,
     describe_algorithm,
     format_crc,
@@ -333,7 +335,7 @@ def search_catalog(
         for algorithm in selected_algorithms:
             if expected_crc > algorithm.mask:
                 continue
-            calculated = calculate_crc(data, algorithm)
+            calculated = calculate_checksum(data, algorithm)
             for crc_mode, candidate_crc in checksum_variants(expected_crc, algorithm.width):
                 tested_count += 1
                 if calculated == candidate_crc:
@@ -358,7 +360,7 @@ def handle_list(args: argparse.Namespace) -> int:
     total_aliases = sum(len(algorithm.aliases) for algorithm in algorithms)
 
     maybe_print_banner(args)
-    print_section("Built-in CRC Catalog")
+    print_section("Built-in CRC & Checksum Catalog")
     print_kv("Algorithms", str(len(algorithms)))
     print_kv("Aliases", str(total_aliases))
     print_kv("Names total", str(len(algorithms) + total_aliases))
@@ -430,10 +432,12 @@ def handle_calc(args: argparse.Namespace) -> int:
         args.original_data = args.calc_items[1]
 
     data = transform_byte_order(load_input_bytes(args), args.byte_order)
-    value = calculate_crc(data, algorithm)
+    value = calculate_checksum(data, algorithm)
 
     maybe_print_banner(args)
-    print_section("CRC Calculation")
+    print_section(
+        "Checksum Calculation" if isinstance(algorithm, ComplementChecksum) else "CRC Calculation"
+    )
     print_kv("Mode", "custom-parameters" if algorithm.name == "manual" else "built-in")
     print_kv("Original data", detect_original_data_kind(args))
     print_kv("Data length", f"{len(data)} bytes")
@@ -481,7 +485,7 @@ def handle_find(args: argparse.Namespace) -> int:
         print_kv("Original data", detect_original_data_kind(args))
         print_kv("Byte-order scan", "all supported modes" if args.scan_byte_order else args.byte_order)
         print_kv("Matches", "0", status="warn")
-        print_error("No catalogued CRC algorithm matched.")
+        print_error("No catalogued CRC or checksum algorithm matched.")
         for report in skipped_modes:
             print_warning(f"Skipped [{report.mode}]: {report.skipped_reason}")
         return 1
@@ -542,7 +546,7 @@ def handle_brute(args: argparse.Namespace) -> int:
             "Tried",
             f"{total_tested} algorithm/checksum combinations across {len(tested_modes)} input byte-order modes.",
         )
-        print_error("Brute scan found no catalogued CRC match.")
+        print_error("Brute scan found no catalogued CRC or checksum match.")
         if algorithm_names_used:
             print_kv("Algorithms", f"{len(algorithm_names_used)} built-in entries")
             print_kv("Algorithm set", ", ".join(algorithm_names_used), status="text")
@@ -802,7 +806,7 @@ def handle_self_test(args: argparse.Namespace) -> int:
 
     maybe_print_banner(args)
     print_section("Self Test")
-    print_kv("Status", "CRC catalog validation passed.", status="success")
+    print_kv("Status", "CRC and checksum catalog validation passed.", status="success")
     return 0
 
 
@@ -864,7 +868,8 @@ def build_parser() -> argparse.ArgumentParser:
         description=(
             f"{render_banner()}\n"
             f"{render_credit_lines()}\n\n"
-            f"{TOOL_NAME} calculates CRCs, matches known CRC algorithms, and handles endian transforms.\n\n"
+            f"{TOOL_NAME} calculates CRCs and complement checksums, matches known algorithms, "
+            "and handles endian transforms.\n\n"
             "Input auto-detection:\n"
             "- values starting with 0x are parsed as the original data bytes in hex\n"
             "- values starting with 0b are parsed as the original data bytes in binary\n"
@@ -882,6 +887,8 @@ def build_parser() -> argparse.ArgumentParser:
             "  python crcforge.py calc 123456789 --algorithm crc-16-modbus\n"
             "  python crcforge.py calc 123456789 --width 16 --poly 0x1021 --init 0xFFFF --refin false --refout false\n"
             "  python crcforge.py calc crc-16-modbus 123456789\n"
+            "  python crcforge.py calc internet-checksum 0x450000730000400040110000C0A80001C0A800C7\n"
+            "  python crcforge.py calc twos-complement-8 0x0300300002337A\n"
             "  python crcforge.py find 0x4B37 0x313233343536373839 --width 16\n"
             "  python crcforge.py find 0b0100101100110111 123456789 --width 16\n"
             "  python crcforge.py brute 0x4B37 asadfdsaaa\n"
@@ -902,10 +909,10 @@ def build_parser() -> argparse.ArgumentParser:
 
     list_parser = subparsers.add_parser(
         "list",
-        help="List built-in CRC algorithms.",
-        description="List the built-in CRC catalog with all parameters.",
+        help="List built-in CRC and checksum algorithms.",
+        description="List the built-in CRC and complement checksum catalog with all parameters.",
     )
-    list_parser.add_argument("--width", type=int, help="Filter by CRC width in bits.")
+    list_parser.add_argument("--width", type=int, help="Filter by CRC/checksum width in bits.")
     list_parser.add_argument(
         "--aliases",
         action="store_true",
@@ -915,9 +922,9 @@ def build_parser() -> argparse.ArgumentParser:
 
     calc_parser = subparsers.add_parser(
         "calc",
-        help="Calculate a CRC using a built-in algorithm or custom parameters.",
+        help="Calculate a CRC or checksum using a built-in algorithm or custom CRC parameters.",
         description=(
-            "Calculate the CRC of the given original data. "
+            "Calculate the CRC or complement checksum of the given original data. "
             "Use either a built-in algorithm name or provide custom CRC parameters."
         ),
     )
@@ -972,9 +979,9 @@ def build_parser() -> argparse.ArgumentParser:
 
     find_parser = subparsers.add_parser(
         "find",
-        help="Find matching built-in CRC algorithms.",
+        help="Find matching built-in CRC and checksum algorithms.",
         description=(
-            "Find matching known CRC algorithms. "
+            "Find matching known CRC and complement checksum algorithms. "
             "This checks one byte-order mode by default, or all modes with --scan-byte-order."
         ),
     )
@@ -1097,7 +1104,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     self_test_parser = subparsers.add_parser(
         "self-test",
-        help="Validate the built-in CRC catalog.",
+        help="Validate the built-in CRC and checksum catalog.",
         description="Run the catalog self-test using the standard payload 123456789.",
     )
     self_test_parser.set_defaults(handler=handle_self_test)

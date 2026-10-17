@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Dict, List, Optional, Sequence, Tuple
+from typing import Dict, List, Optional, Sequence, Tuple, Union
 
 
 @dataclass(frozen=True)
@@ -19,6 +19,29 @@ class CrcAlgorithm:
     @property
     def mask(self) -> int:
         return (1 << self.width) - 1
+
+
+@dataclass(frozen=True)
+class ComplementChecksum:
+    """Sum of big-endian `width`-bit words, finalized with a ones or twos complement.
+
+    end_around_carry=True folds carries back into the sum (RFC 1071 one's complement
+    arithmetic); False discards them (plain modulo 2^width sum).
+    """
+
+    name: str
+    width: int
+    complement: str
+    end_around_carry: bool
+    aliases: Tuple[str, ...] = ()
+    check: Optional[int] = None
+
+    @property
+    def mask(self) -> int:
+        return (1 << self.width) - 1
+
+
+Algorithm = Union[CrcAlgorithm, ComplementChecksum]
 
 
 def reflect_bits(value: int, width: int) -> int:
@@ -61,6 +84,38 @@ def calculate_crc(data: bytes, algorithm: CrcAlgorithm) -> int:
         crc = reflect_bits(crc, algorithm.width)
 
     return (crc ^ algorithm.xor_out) & mask
+
+
+def calculate_complement_checksum(data: bytes, algorithm: ComplementChecksum) -> int:
+    if algorithm.width <= 0 or algorithm.width % 8 != 0:
+        raise ValueError("Complement checksum width must be a positive multiple of 8.")
+    if algorithm.complement not in ("ones", "twos"):
+        raise ValueError(f"Unsupported complement mode: {algorithm.complement}")
+
+    mask = algorithm.mask
+    word_size = algorithm.width // 8
+    padded = data + bytes(-len(data) % word_size)
+    total = sum(
+        int.from_bytes(padded[index : index + word_size], byteorder="big")
+        for index in range(0, len(padded), word_size)
+    )
+
+    if algorithm.end_around_carry:
+        # Deferred carry folding gives the same result as folding after every word.
+        while total > mask:
+            total = (total & mask) + (total >> algorithm.width)
+    else:
+        total &= mask
+
+    if algorithm.complement == "ones":
+        return ~total & mask
+    return -total & mask
+
+
+def calculate_checksum(data: bytes, algorithm: Algorithm) -> int:
+    if isinstance(algorithm, ComplementChecksum):
+        return calculate_complement_checksum(data, algorithm)
+    return calculate_crc(data, algorithm)
 
 
 def format_crc(value: int, width: int) -> str:
@@ -677,18 +732,80 @@ ALGORITHM_CATALOG: Tuple[CrcAlgorithm, ...] = (
 )
 
 
+CHECKSUM_CATALOG: Tuple[ComplementChecksum, ...] = (
+    ComplementChecksum(
+        "ones-complement-8",
+        8,
+        "ones",
+        True,
+        ("1s-complement-8",),
+        0x21,
+    ),
+    ComplementChecksum(
+        "ones-complement-8-no-carry",
+        8,
+        "ones",
+        False,
+        ("motorola-srec", "s-record", "srec"),
+        0x22,
+    ),
+    ComplementChecksum(
+        "ones-complement-16",
+        16,
+        "ones",
+        True,
+        ("1s-complement-16", "internet-checksum", "inet-checksum", "ip-checksum", "rfc-1071"),
+        0xF62A,
+    ),
+    ComplementChecksum(
+        "ones-complement-32",
+        32,
+        "ones",
+        True,
+        ("1s-complement-32",),
+        0x60979593,
+    ),
+    ComplementChecksum(
+        "twos-complement-8",
+        8,
+        "twos",
+        False,
+        ("2s-complement-8", "intel-hex", "ihex", "modbus-lrc"),
+        0x23,
+    ),
+    ComplementChecksum(
+        "twos-complement-16",
+        16,
+        "twos",
+        False,
+        ("2s-complement-16",),
+        0xF62C,
+    ),
+    ComplementChecksum(
+        "twos-complement-32",
+        32,
+        "twos",
+        False,
+        ("2s-complement-32",),
+        0x60979594,
+    ),
+)
+
+FULL_CATALOG: Tuple[Algorithm, ...] = ALGORITHM_CATALOG + CHECKSUM_CATALOG
+
+
 def _normalize_name(name: str) -> str:
     return name.strip().lower().replace("_", "-").replace(" ", "")
 
 
-def _build_lookup() -> Dict[str, CrcAlgorithm]:
-    lookup: Dict[str, CrcAlgorithm] = {}
-    for algorithm in ALGORITHM_CATALOG:
+def _build_lookup() -> Dict[str, Algorithm]:
+    lookup: Dict[str, Algorithm] = {}
+    for algorithm in FULL_CATALOG:
         names = (algorithm.name,) + algorithm.aliases
         for name in names:
             normalized = _normalize_name(name)
             if normalized in lookup and lookup[normalized] != algorithm:
-                raise ValueError(f"Duplicate CRC alias detected: {name}")
+                raise ValueError(f"Duplicate algorithm alias detected: {name}")
             lookup[normalized] = algorithm
     return lookup
 
@@ -696,20 +813,20 @@ def _build_lookup() -> Dict[str, CrcAlgorithm]:
 ALGORITHMS_BY_NAME = _build_lookup()
 
 
-def get_algorithm(name: str) -> CrcAlgorithm:
+def get_algorithm(name: str) -> Algorithm:
     normalized = _normalize_name(name)
     try:
         return ALGORITHMS_BY_NAME[normalized]
     except KeyError as error:
-        raise KeyError(f"Unknown CRC algorithm: {name}") from error
+        raise KeyError(f"Unknown CRC or checksum algorithm: {name}") from error
 
 
 def get_algorithms(
     names: Optional[Sequence[str]] = None,
     width: Optional[int] = None,
-) -> List[CrcAlgorithm]:
+) -> List[Algorithm]:
     if names:
-        selected: List[CrcAlgorithm] = []
+        selected: List[Algorithm] = []
         seen = set()
         for name in names:
             algorithm = get_algorithm(name)
@@ -717,7 +834,7 @@ def get_algorithms(
                 selected.append(algorithm)
                 seen.add(algorithm.name)
     else:
-        selected = list(ALGORITHM_CATALOG)
+        selected = list(FULL_CATALOG)
 
     if width is not None:
         selected = [algorithm for algorithm in selected if algorithm.width == width]
@@ -730,17 +847,24 @@ def find_matching_algorithms(
     expected_crc: int,
     names: Optional[Sequence[str]] = None,
     width: Optional[int] = None,
-) -> List[CrcAlgorithm]:
-    matches: List[CrcAlgorithm] = []
+) -> List[Algorithm]:
+    matches: List[Algorithm] = []
     for algorithm in get_algorithms(names=names, width=width):
         if expected_crc > algorithm.mask:
             continue
-        if calculate_crc(data, algorithm) == expected_crc:
+        if calculate_checksum(data, algorithm) == expected_crc:
             matches.append(algorithm)
     return matches
 
 
-def describe_algorithm(algorithm: CrcAlgorithm) -> str:
+def describe_algorithm(algorithm: Algorithm) -> str:
+    if isinstance(algorithm, ComplementChecksum):
+        carry = "end-around" if algorithm.end_around_carry else "discard"
+        return (
+            f"{algorithm.name}: width={algorithm.width}, "
+            f"complement={algorithm.complement}, carry={carry}, "
+            f"words={algorithm.width}-bit big-endian"
+        )
     return (
         f"{algorithm.name}: width={algorithm.width}, "
         f"poly={format_crc(algorithm.poly, algorithm.width)}, "
@@ -753,10 +877,10 @@ def describe_algorithm(algorithm: CrcAlgorithm) -> str:
 def validate_catalog() -> List[str]:
     failures: List[str] = []
     probe = b"123456789"
-    for algorithm in ALGORITHM_CATALOG:
+    for algorithm in FULL_CATALOG:
         if algorithm.check is None:
             continue
-        calculated = calculate_crc(probe, algorithm)
+        calculated = calculate_checksum(probe, algorithm)
         if calculated != algorithm.check:
             failures.append(
                 f"{algorithm.name}: expected {format_crc(algorithm.check, algorithm.width)}, "

@@ -46,6 +46,38 @@ The built-in catalog is based on the RevEng CRC catalogue:
 
 RevEng attested and confirmed CRC definitions are included here. When multiple RevEng names map to the same exact parameter set, CRCForge stores one primary implementation and exposes the rest as aliases.
 
+### Complement Checksums
+
+Next to the CRCs, the catalog contains one's complement and two's complement checksums. They work everywhere a CRC name works: `calc`, `find`, `brute`, `list`, and `self-test`.
+
+Every complement checksum sums the data as big-endian words of the checksum width (8-bit bytes, 16-bit words, or 32-bit words). If the input length is not a whole number of words, CRCForge pads the end with zero bytes. Then it complements the sum:
+
+- **One's complement**: carries are folded back into the sum (end-around carry, RFC 1071), then every bit is inverted.
+- **One's complement, no carry**: carries are discarded (plain modulo sum), then every bit is inverted.
+- **Two's complement**: carries are discarded, then the sum is negated, so `sum + checksum == 0` modulo 2^width.
+
+| Name | Width | Complement | Carry | Aliases | Check (`123456789`) |
+| --- | --- | --- | --- | --- | --- |
+| `ones-complement-8` | 8 | ones | end-around | `1s-complement-8` | `0x21` |
+| `ones-complement-8-no-carry` | 8 | ones | discard | `motorola-srec`, `s-record`, `srec` | `0x22` |
+| `ones-complement-16` | 16 | ones | end-around | `internet-checksum`, `inet-checksum`, `ip-checksum`, `rfc-1071`, `1s-complement-16` | `0xF62A` |
+| `ones-complement-32` | 32 | ones | end-around | `1s-complement-32` | `0x60979593` |
+| `twos-complement-8` | 8 | twos | discard | `intel-hex`, `ihex`, `modbus-lrc`, `2s-complement-8` | `0x23` |
+| `twos-complement-16` | 16 | twos | discard | `2s-complement-16` | `0xF62C` |
+| `twos-complement-32` | 32 | twos | discard | `2s-complement-32` | `0x60979594` |
+
+Examples:
+
+```powershell
+crcforge calc internet-checksum 0x450000730000400040110000C0A80001C0A800C7
+crcforge calc twos-complement-8 0x0300300002337A
+crcforge find 0x1E 0x0300300002337A
+```
+
+The first example calculates the IPv4 header checksum (`0xB861`). The second calculates an Intel HEX record checksum (`0x1E`).
+
+Words are always read big-endian. For little-endian 16-bit or 32-bit words, use `--byte-order swap16` or `--byte-order swap32`. `find --scan-byte-order` and `brute` try those modes automatically.
+
 ## Core Model
 
 CRCForge intentionally treats the payload (`original-data`) and the target checksum (`checksum`) as different kinds of input.
@@ -323,7 +355,7 @@ This is useful for:
 
 ### `list`
 
-Use `list` to inspect the built-in CRC catalog.
+Use `list` to inspect the built-in CRC and complement checksum catalog.
 
 Examples:
 
@@ -343,7 +375,7 @@ crcforge list --width 16 --aliases
 
 ### `self-test`
 
-Use `self-test` to validate the built-in catalog against the standard `123456789` check vectors.
+Use `self-test` to validate the built-in CRC and checksum catalog against the standard `123456789` check vectors.
 
 ```powershell
 crcforge self-test
