@@ -1,0 +1,58 @@
+site_name: CRCForge
+site_description: Calculate, identify, reverse-engineer and forge CRCs and checksums.
+site_url: https://kayranfatih.github.io/crcforge/
+repo_url: https://github.com/kayranfatih/crcforge
+repo_name: kayranfatih/crcforge
+edit_uri: edit/main/docs/
+copyright: Copyright &copy; Fatih Kayran. Apache License 2.0.
+
+theme:
+  name: material
+  logo: assets/crcforge_logo.png
+  favicon: assets/crcforge_logo.png
+  palette:
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: indigo
+      toggle:
+        icon: material/weather-night
+        name: Switch to dark mode
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: indigo
+      toggle:
+        icon: material/weather-sunny
+        name: Switch to light mode
+  features:
+    - content.code.copy
+    - navigation.sections
+    - navigation.top
+    - search.highlight
+
+nav:
+  - Home: index.md
+  - Guide:
+      - Concepts: guide/concepts.md
+      - Reverse-engineering a checksum: guide/reverse-engineering.md
+      - Forging: guide/forging.md
+  - Command reference: commands.md
+  - Python API: python-api.md
+  - Algorithms: algorithms.md
+  - Changelog: changelog.md
+
+markdown_extensions:
+  - admonition
+  - attr_list
+  - tables
+  - toc:
+      permalink: true
+  - pymdownx.details
+  - pymdownx.highlight
+  - pymdownx.inlinehilite
+  - pymdownx.superfences
+  - pymdownx.snippets:
+      base_path: ["."]
+      check_paths: true
+
+exclude_docs: |
+  requirements.txt

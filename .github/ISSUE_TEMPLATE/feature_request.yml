@@ -1,0 +1,16 @@
+name: Feature request
+description: Suggest a new algorithm, command or improvement.
+labels: [enhancement]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: What are you trying to do?
+      description: Describe the task or protocol. Sample data and checksums help a lot.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: What would help?
+      description: The command, option or algorithm you have in mind, with a reference if it is a checksum definition.

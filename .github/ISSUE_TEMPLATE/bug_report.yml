@@ -1,0 +1,34 @@
+name: Bug report
+description: Something gives a wrong result, crashes or behaves unexpectedly.
+labels: [bug]
+body:
+  - type: textarea
+    id: command
+    attributes:
+      label: Command
+      description: The exact command you ran (or the Python code).
+      render: shell
+    validations:
+      required: true
+  - type: textarea
+    id: output
+    attributes:
+      label: What happened
+      description: The output you got. `--json` output is especially helpful.
+      render: text
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected
+      description: For a wrong checksum, include the expected value and where it comes from (spec, device, other tool).
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: Output of `crcforge --version` and your Python version and OS.
+    validations:
+      required: true
