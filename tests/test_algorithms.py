@@ -4,7 +4,6 @@ import sys
 import unittest
 from pathlib import Path
 
-
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from crcforge.algorithms import (
@@ -43,9 +42,9 @@ class ComplementChecksumTestCase(unittest.TestCase):
 
     def test_ones_complement_end_around_carry(self) -> None:
         # 0xFF + 0x02 = 0x101 -> fold carry -> 0x02 -> complement -> 0xFD
-        self.assertEqual(calculate_checksum(b"\xFF\x02", get_algorithm("ones-complement-8")), 0xFD)
+        self.assertEqual(calculate_checksum(b"\xff\x02", get_algorithm("ones-complement-8")), 0xFD)
         # Same input with carries discarded: 0x01 -> complement -> 0xFE
-        self.assertEqual(calculate_checksum(b"\xFF\x02", get_algorithm("srec")), 0xFE)
+        self.assertEqual(calculate_checksum(b"\xff\x02", get_algorithm("srec")), 0xFE)
 
     def test_intel_hex_record_checksum(self) -> None:
         record = bytes.fromhex("0300300002337A")
@@ -63,8 +62,7 @@ class ComplementChecksumTestCase(unittest.TestCase):
             padded = data + bytes(-len(data) % word_size)
             checksum = calculate_checksum(data, algorithm)
             total = sum(
-                int.from_bytes(padded[index : index + word_size], "big")
-                for index in range(0, len(padded), word_size)
+                int.from_bytes(padded[index : index + word_size], "big") for index in range(0, len(padded), word_size)
             )
             self.assertEqual((total + checksum) & algorithm.mask, 0, name)
 

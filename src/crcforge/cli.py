@@ -1,26 +1,46 @@
+"""Command-line interface for CRCForge."""
+
 from __future__ import annotations
 
 import argparse
-import os
 import sys
-import time
-from dataclasses import dataclass
-from typing import List, Optional, Sequence, Tuple
+from collections.abc import Callable, Sequence
+from pathlib import Path
 
+from . import __version__
 from . import io as io_helpers
-from .algorithms import (
-    ComplementChecksum,
-    CrcAlgorithm,
-    calculate_checksum,
-    calculate_crc,
-    describe_algorithm,
-    format_crc,
+from .byteorder import BYTE_ORDER_MODES, describe_byte_order, distinct_views, transform_byte_order
+from .catalog import (
+    CHECK_INPUT,
+    FAMILIES,
+    FULL_CATALOG,
+    Algorithm,
+    UnknownAlgorithmError,
     get_algorithm,
     get_algorithms,
     validate_catalog,
 )
-from .byteorder import BYTE_ORDER_MODES, describe_byte_order, transform_byte_order
-
+from .checksums import CARRY_MODES, COMPLEMENT_MODES, ENDIAN_MODES, SumChecksum
+from .codegen import LANGUAGES, CodegenError, generate
+from .crc import CrcAlgorithm, calculate_residue, format_value, validate_params
+from .forge import ForgeError, forge
+from .frames import DEFAULT_FRAME_WIDTHS, POSITIONS, FrameLayout, candidate_layouts
+from .io import InputError, format_bytes, format_crc_result, parse_checksum_value, parse_value_spec
+from .output import ANSI_CREDIT, ANSI_FRAME, ANSI_TEXT, Output, colorize, supports_color
+from .records import check_records
+from .solver import (
+    ENUMERATE_LIMIT,
+    REFLECTION_COMBOS,
+    CrcMatch,
+    Sample,
+    ScanView,
+    SolveResult,
+    checksum_variants,
+    default_jobs,
+    expected_chance_matches,
+    scan_custom,
+    solve,
+)
 
 TOOL_NAME = "CRCForge"
 PLAIN_BANNER = r"""
@@ -36,189 +56,96 @@ PLAIN_BANNER = r"""
 AUTHOR_LINE = "by Fatih Kayran"
 SOCIAL_LINE = "X/Twitter: @kayranfatih"
 
-ANSI_RESET = "\033[0m"
-ANSI_FRAME = "\033[38;5;39m"
-ANSI_TEXT = "\033[38;5;51m"
-ANSI_CREDIT = "\033[38;5;220m"
-ANSI_INFO = "\033[38;5;45m"
-ANSI_WARN = "\033[38;5;214m"
-ANSI_ERROR = "\033[38;5;196m"
-ANSI_SUCCESS = "\033[38;5;82m"
+EXIT_OK = 0
+EXIT_NO_MATCH = 1
+EXIT_USAGE = 2
+EXIT_INTERRUPTED = 130
+
+MATCH_DISPLAY_LIMIT = 50
+DERIVED_DISPLAY_LIMIT = 8
+GLOBAL_FLAGS = frozenset({"--json", "-q", "--quiet", "--no-color", "--show-banner"})
 
 
-@dataclass
-class ModeReport:
-    mode: str
-    tested_count: int
-    skipped_reason: Optional[str] = None
-
-
-@dataclass
-class MatchReport:
-    input_mode: str
-    crc_mode: str
-    description: str
-
-
-@dataclass(frozen=True)
-class ParsedChecksum:
-    value: int
-    width_hint: int
-
-
-class HelpFormatter(argparse.RawDescriptionHelpFormatter):
+class CliError(InputError):
     pass
 
 
-def supports_color(stream: Optional[object] = None) -> bool:
-    target = stream if stream is not None else sys.stdout
-    if os.getenv("NO_COLOR") is not None:
-        return False
-    if os.getenv("FORCE_COLOR") is not None:
-        return True
-    return bool(getattr(target, "isatty", lambda: False)())
+# --- Presentation helpers ------------------------------------------------------------------
 
 
-def colorize(text: str, ansi_code: str, enabled: bool) -> str:
-    if not enabled:
-        return text
-    return f"{ansi_code}{text}{ANSI_RESET}"
-
-
-def style(text: str, ansi_code: str, stream: Optional[object] = None) -> str:
-    return colorize(text, ansi_code, supports_color(stream))
-
-
-def print_info(text: str) -> None:
-    print(style(text, ANSI_INFO))
-
-
-def print_success(text: str) -> None:
-    print(style(text, ANSI_SUCCESS))
-
-
-def print_warning(text: str) -> None:
-    print(style(text, ANSI_WARN))
-
-
-def print_error(text: str) -> None:
-    print(style(text, ANSI_ERROR, sys.stderr), file=sys.stderr)
-
-
-def print_section(title: str) -> None:
-    print(style(title, ANSI_FRAME))
-
-
-def print_kv(label: str, value: str, status: str = "info") -> None:
-    palette = {
-        "info": ANSI_INFO,
-        "success": ANSI_SUCCESS,
-        "warn": ANSI_WARN,
-        "error": ANSI_ERROR,
-        "text": ANSI_TEXT,
-    }
-    colored_label = style(f"{label:16}", palette.get(status, ANSI_INFO))
-    print(f"{colored_label} {value}")
-
-
-def render_banner() -> str:
-    colored = supports_color()
+def render_banner(color: bool | None = None) -> str:
+    colored = supports_color() if color is None else color
     lines = []
     for line in PLAIN_BANNER.splitlines():
-        if line.startswith("+") or line.startswith("|"):
-            lines.append(colorize(line, ANSI_FRAME, colored))
-        else:
-            lines.append(colorize(line, ANSI_TEXT, colored))
+        code = ANSI_FRAME if line.startswith(("+", "|")) else ANSI_TEXT
+        lines.append(colorize(line, code, colored))
     return "\n".join(lines)
 
 
-def render_credit_lines() -> str:
-    colored = supports_color()
-    return "\n".join(
-        (
-            colorize(AUTHOR_LINE, ANSI_CREDIT, colored),
-            colorize(SOCIAL_LINE, ANSI_CREDIT, colored),
+def render_credit_lines(color: bool | None = None) -> str:
+    colored = supports_color() if color is None else color
+    return "\n".join((colorize(AUTHOR_LINE, ANSI_CREDIT, colored), colorize(SOCIAL_LINE, ANSI_CREDIT, colored)))
+
+
+def plural(count: int, noun: str, plural_form: str | None = None) -> str:
+    return f"{count} {noun if count == 1 else (plural_form or noun + 's')}"
+
+
+def describe_params(algorithm: Algorithm) -> str:
+    """The parameter part of ``describe()``, without the name."""
+    return algorithm.describe().split(": ", 1)[1]
+
+
+def match_label(algorithm: Algorithm, catalog_name: str | None = None) -> str:
+    if algorithm.name.startswith("custom"):
+        text = describe_params(algorithm)
+        if catalog_name:
+            text += f"  (= {catalog_name})"
+        return text
+    return algorithm.describe()
+
+
+def algorithm_json(algorithm: Algorithm) -> dict[str, object]:
+    payload: dict[str, object] = {
+        "name": algorithm.name,
+        "family": algorithm.family,
+        "width": algorithm.width,
+        "aliases": list(algorithm.aliases),
+        "params": algorithm.params(),
+    }
+    if algorithm.check is not None:
+        payload["check"] = format_value(algorithm.check, algorithm.width)
+    if isinstance(algorithm, CrcAlgorithm):
+        if algorithm.residue is not None:
+            payload["residue"] = format_value(algorithm.residue, algorithm.width)
+        payload["reveng"] = algorithm.reveng_spec()
+        if algorithm.status:
+            payload["status"] = algorithm.status
+        if algorithm.reference_url:
+            payload["reference"] = algorithm.reference_url
+    return payload
+
+
+def value_json(value: int, width: int) -> dict[str, object]:
+    return {"value": value, "hex": format_value(value, width)}
+
+
+def mode_tag(input_mode: str, crc_mode: str, show_input: bool = True) -> str:
+    return f"[input:{input_mode}][crc:{crc_mode}]" if show_input else f"[crc:{crc_mode}]"
+
+
+def coincidence_note(out: Output, sample_count: int, width: int, match_count: int) -> None:
+    if match_count > 1 and sample_count == 1 and width <= 16:
+        out.note(
+            f"With a single sample, short {width}-bit checksums often match by coincidence. "
+            "Confirm with more samples: crcforge solve DATA:CHECKSUM DATA:CHECKSUM ..."
         )
-    )
 
 
-def parse_crc_value(raw_value: str) -> int:
-    return io_helpers.parse_crc_value(raw_value)
+# --- Argument parsing helpers --------------------------------------------------------------
 
 
-def parse_checksum_value(raw_value: str) -> ParsedChecksum:
-    parsed = io_helpers.parse_checksum_value(raw_value)
-    return ParsedChecksum(parsed.value, parsed.width_hint)
-
-
-def normalize_literal(raw_value: str) -> str:
-    return io_helpers.normalize_literal(raw_value)
-
-
-def parse_hex_bytes(raw_value: str) -> bytes:
-    return io_helpers.parse_hex_bytes(raw_value)
-
-
-def parse_binary_bytes(raw_value: str) -> bytes:
-    return io_helpers.parse_binary_bytes(raw_value)
-
-
-def is_hex_literal(raw_value: str) -> bool:
-    return io_helpers.is_hex_literal(raw_value)
-
-
-def is_binary_literal(raw_value: str) -> bool:
-    return io_helpers.is_binary_literal(raw_value)
-
-
-def load_input_bytes(args: argparse.Namespace) -> bytes:
-    return io_helpers.load_input_bytes(args)
-
-
-def parse_spec_value(raw_value: str) -> int:
-    return parse_crc_value(raw_value)
-
-
-def parse_value_spec(raw_value: str, mask: int, label: str) -> List[int]:
-    values: List[int] = []
-    seen = set()
-    for part in raw_value.split(","):
-        token = part.strip()
-        if not token:
-            continue
-        if ":" in token:
-            bounds = [item.strip() for item in token.split(":")]
-            if len(bounds) not in (2, 3):
-                raise ValueError(
-                    f"Invalid {label} range '{token}'. Use START:END or START:END:STEP."
-                )
-            start = parse_spec_value(bounds[0])
-            end = parse_spec_value(bounds[1])
-            step = parse_spec_value(bounds[2]) if len(bounds) == 3 else 1
-            if step <= 0:
-                raise ValueError(f"{label} range step must be positive.")
-            if start > end:
-                raise ValueError(f"{label} range start must be <= end.")
-            candidates = range(start, end + 1, step)
-        else:
-            candidates = [parse_spec_value(token)]
-
-        for value in candidates:
-            if value < 0 or value > mask:
-                raise ValueError(
-                    f"{label} value {format_crc(value, max(1, mask.bit_length()))} is outside "
-                    f"the selected width."
-                )
-            if value not in seen:
-                values.append(value)
-                seen.add(value)
-
-    if not values:
-        raise ValueError(f"{label} specification is empty.")
-    return values
-
-
-def parse_reflect_option(raw_value: str) -> List[bool]:
+def parse_reflect_option(raw_value: str) -> list[bool]:
     normalized = raw_value.strip().lower()
     if normalized == "auto":
         return [False, True]
@@ -226,920 +153,1498 @@ def parse_reflect_option(raw_value: str) -> List[bool]:
         return [True]
     if normalized in ("false", "0", "no", "off"):
         return [False]
-    raise ValueError("Reflection option must be one of: auto, true, false.")
+    raise CliError(f"Invalid reflection option: {raw_value}", hint="Use auto, true or false.")
 
 
-def parse_reflect_value(
-    raw_value: Optional[str],
-    label: str,
-    default: bool = False,
-) -> bool:
+def parse_reflect_value(raw_value: str | None, label: str, default: bool = False) -> bool:
     if raw_value is None:
         return default
     values = parse_reflect_option(raw_value)
     if len(values) != 1:
-        raise ValueError(f"{label} must be true or false for direct calculation.")
+        raise CliError(f"{label} must be true or false here, not auto.")
     return values[0]
 
 
-def describe_manual_params(
-    width: int,
-    poly: int,
-    init: int,
-    refin: bool,
-    refout: bool,
-    xor_out: int,
-) -> str:
-    return (
-        f"width={width}, "
-        f"poly={format_crc(poly, width)}, "
-        f"init={format_crc(init, width)}, "
-        f"refin={refin}, "
-        f"refout={refout}, "
-        f"xor_out={format_crc(xor_out, width)}"
-    )
+def parse_offset(raw_value: str, data_length: int) -> int:
+    text = raw_value.strip().lower()
+    if text == "end":
+        return data_length
+    if text == "start":
+        return 0
+    value = io_helpers.parse_number(raw_value, "offset")
+    if value < 0:
+        value += data_length
+    return value
 
 
-def using_custom_crc_params(args: argparse.Namespace) -> bool:
-    return any(
-        getattr(args, field, None) is not None
-        for field in ("poly", "init", "xor_out", "refin", "refout")
-    )
+def using_custom_crc(args: argparse.Namespace) -> bool:
+    return any(getattr(args, name, None) is not None for name in ("poly", "init", "xor_out", "refin", "refout"))
 
 
-def using_full_custom_brute(args: argparse.Namespace) -> bool:
-    return bool(getattr(args, "full_custom", False))
+def using_custom_sum(args: argparse.Namespace) -> bool:
+    return bool(getattr(args, "sum", False))
 
 
-def detect_original_data_kind(args: argparse.Namespace) -> str:
-    return io_helpers.detect_original_data_kind(args)
-
-
-def format_crc_result(value: int, width: int, output_format: str) -> str:
-    return io_helpers.format_crc_result(value, width, output_format)
-
-
-def format_bytes(data: bytes, output_format: str) -> str:
-    return io_helpers.format_bytes(data, output_format)
-
-
-def unique_modes(primary_mode: str, scan_all: bool) -> List[str]:
-    if not scan_all:
-        return [primary_mode]
-
-    ordered_modes = [primary_mode]
-    for mode in BYTE_ORDER_MODES:
-        if mode != primary_mode:
-            ordered_modes.append(mode)
-    return ordered_modes
-
-
-def maybe_print_banner(args: argparse.Namespace) -> None:
-    if getattr(args, "show_banner", False):
-        print(render_banner())
-        print(render_credit_lines())
-
-
-def checksum_variants(expected_crc: int, width: int) -> List[Tuple[str, int]]:
-    variants = [("as-given", expected_crc)]
-    if width <= 8 or width % 8 != 0:
-        return variants
-
-    byte_length = width // 8
-    swapped = int.from_bytes(expected_crc.to_bytes(byte_length, byteorder="big"), "little")
-    if swapped != expected_crc:
-        variants.append(("byte-swapped", swapped))
-    return variants
-
-
-def search_catalog(
-    raw_data: bytes,
-    expected_crc: int,
-    algorithm_names: Optional[Sequence[str]],
-    width: Optional[int],
-    modes: Sequence[str],
-) -> Tuple[List[MatchReport], List[ModeReport], List[str]]:
-    mode_matches: List[MatchReport] = []
-    mode_reports: List[ModeReport] = []
-    selected_algorithms = get_algorithms(names=algorithm_names, width=width)
-    algorithm_names_used = [algorithm.name for algorithm in selected_algorithms]
-
-    for mode in modes:
-        try:
-            data = transform_byte_order(raw_data, mode)
-        except ValueError as error:
-            mode_reports.append(ModeReport(mode=mode, tested_count=0, skipped_reason=str(error)))
-            continue
-
-        tested_count = 0
-        for algorithm in selected_algorithms:
-            if expected_crc > algorithm.mask:
-                continue
-            calculated = calculate_checksum(data, algorithm)
-            for crc_mode, candidate_crc in checksum_variants(expected_crc, algorithm.width):
-                tested_count += 1
-                if calculated == candidate_crc:
-                    mode_matches.append(
-                        MatchReport(
-                            input_mode=mode,
-                            crc_mode=crc_mode,
-                            description=describe_algorithm(algorithm),
-                        )
-                    )
-        mode_reports.append(ModeReport(mode=mode, tested_count=tested_count))
-
-    return mode_matches, mode_reports, algorithm_names_used
-
-
-def handle_list(args: argparse.Namespace) -> int:
-    algorithms = get_algorithms(width=args.width)
-    if not algorithms:
-        print_error("No algorithms matched the requested filters.")
-        return 1
-
-    total_aliases = sum(len(algorithm.aliases) for algorithm in algorithms)
-
-    maybe_print_banner(args)
-    print_section("Built-in CRC & Checksum Catalog")
-    print_kv("Algorithms", str(len(algorithms)))
-    print_kv("Aliases", str(total_aliases))
-    print_kv("Names total", str(len(algorithms) + total_aliases))
-    if args.width:
-        print_kv("Width filter", str(args.width))
-    for algorithm in algorithms:
-        print_kv("Algorithm", describe_algorithm(algorithm), status="text")
-        if args.aliases and algorithm.aliases:
-            print_kv("Aliases", ", ".join(algorithm.aliases), status="text")
-    return 0
-
-
-def handle_calc(args: argparse.Namespace) -> int:
-    custom_requested = using_custom_crc_params(args) or args.width is not None
-    if args.algorithm and custom_requested:
-        raise ValueError(
-            "Do not combine --algorithm with custom CRC parameters. "
-            "Use either a built-in algorithm or explicit custom parameters."
+def custom_algorithm(args: argparse.Namespace) -> Algorithm | None:
+    """The algorithm described by custom parameter flags, if any were given."""
+    if using_custom_sum(args):
+        if using_custom_crc(args):
+            raise CliError("Use either --sum or CRC parameters (--poly, --init, ...), not both.")
+        width = args.width or 8
+        word_bits = args.word_size or 8
+        if word_bits % 8:
+            raise CliError("--word-size must be a multiple of 8 bits.")
+        return SumChecksum(
+            "custom-sum",
+            width,
+            word_size=word_bits // 8,
+            endian=args.endian or "big",
+            carry=args.carry or "discard",
+            complement=args.complement or "none",
         )
-
-    if args.algorithm:
-        if len(args.calc_items) != 1:
-            raise ValueError(
-                "When using --algorithm, provide exactly one original-data value."
-            )
-        args.original_data = args.calc_items[0]
-        algorithm = get_algorithm(args.algorithm)
-    elif custom_requested:
-        if len(args.calc_items) != 1:
-            raise ValueError(
-                "Custom calculation expects exactly one original-data value."
-            )
-        if args.width is None:
-            raise ValueError("Custom calculation requires --width.")
-        if args.poly is None:
-            raise ValueError("Custom calculation requires --poly.")
-        args.original_data = args.calc_items[0]
-        width = args.width
-        if width <= 0:
-            raise ValueError("Width must be positive.")
-        mask = (1 << width) - 1
-        poly = parse_value_spec(args.poly, mask, "poly")
-        if len(poly) != 1:
-            raise ValueError("Custom calculation requires exactly one poly value.")
-        init = parse_value_spec(args.init or "0x0", mask, "init")
-        if len(init) != 1:
-            raise ValueError("Custom calculation requires exactly one init value.")
-        xor_out = parse_value_spec(args.xor_out or "0x0", mask, "xor-out")
-        if len(xor_out) != 1:
-            raise ValueError("Custom calculation requires exactly one xor-out value.")
-        refin = parse_reflect_value(args.refin, "RefIn", default=False)
-        refout = parse_reflect_value(args.refout, "RefOut", default=False)
-        algorithm = CrcAlgorithm(
-            name="manual",
-            width=width,
-            poly=poly[0],
-            init=init[0],
-            xor_out=xor_out[0],
-            refin=refin,
-            refout=refout,
-        )
-    else:
-        if len(args.calc_items) != 2:
-            raise ValueError(
-                "Built-in calculation expects 'calc <algorithm> <original-data>'. "
-                "For custom calculation use 'calc <original-data> --poly ... --width ...'."
-            )
-        algorithm = get_algorithm(args.calc_items[0])
-        args.original_data = args.calc_items[1]
-
-    data = transform_byte_order(load_input_bytes(args), args.byte_order)
-    value = calculate_checksum(data, algorithm)
-
-    maybe_print_banner(args)
-    print_section(
-        "Checksum Calculation" if isinstance(algorithm, ComplementChecksum) else "CRC Calculation"
-    )
-    print_kv("Mode", "custom-parameters" if algorithm.name == "manual" else "built-in")
-    print_kv("Original data", detect_original_data_kind(args))
-    print_kv("Data length", f"{len(data)} bytes")
-    print_kv("Byte order", f"{args.byte_order} ({describe_byte_order(args.byte_order)})")
-    if algorithm.name == "manual":
-        print_kv(
-            "Parameters",
-            describe_manual_params(
-                algorithm.width,
-                algorithm.poly,
-                algorithm.init,
-                algorithm.refin,
-                algorithm.refout,
-                algorithm.xor_out,
-            ),
-        )
-    else:
-        print_kv("Algorithm", describe_algorithm(algorithm))
-    print_kv(
-        "Result",
-        format_crc_result(value, algorithm.width, args.output_format),
-        status="success",
-    )
-    return 0
-
-
-def handle_find(args: argparse.Namespace) -> int:
-    raw_data = load_input_bytes(args)
-    checksum = parse_checksum_value(args.checksum)
-    expected_crc = checksum.value
-    checksum_width = max(8, args.width or checksum.width_hint)
-    mode_matches, mode_reports, _ = search_catalog(
-        raw_data=raw_data,
-        expected_crc=expected_crc,
-        algorithm_names=args.algorithm,
-        width=args.width,
-        modes=unique_modes(args.byte_order, args.scan_byte_order),
-    )
-    skipped_modes = [report for report in mode_reports if report.skipped_reason]
-
-    if not mode_matches:
-        maybe_print_banner(args)
-        print_section("CRC Match Search")
-        print_kv("Checksum", format_crc(expected_crc, checksum_width))
-        print_kv("Original data", detect_original_data_kind(args))
-        print_kv("Byte-order scan", "all supported modes" if args.scan_byte_order else args.byte_order)
-        print_kv("Matches", "0", status="warn")
-        print_error("No catalogued CRC or checksum algorithm matched.")
-        for report in skipped_modes:
-            print_warning(f"Skipped [{report.mode}]: {report.skipped_reason}")
-        return 1
-
-    maybe_print_banner(args)
-    print_section("CRC Match Search")
-    print_kv("Checksum", format_crc(expected_crc, checksum_width))
-    print_kv("Original data", detect_original_data_kind(args))
-    print_kv("Byte-order scan", "all supported modes" if args.scan_byte_order else args.byte_order)
-    print_kv("Matches", str(len(mode_matches)), status="success")
-    for report in skipped_modes:
-        print_warning(f"Skipped [{report.mode}]: {report.skipped_reason}")
-
-    show_mode = args.scan_byte_order or args.byte_order != "native"
-    for match in mode_matches:
-        if show_mode:
-            print_kv(
-                "Match",
-                f"[input:{match.input_mode}][crc:{match.crc_mode}] {match.description}",
-                status="success",
-            )
-        else:
-            print_kv("Match", f"[crc:{match.crc_mode}] {match.description}", status="success")
-    return 0
-
-
-def handle_brute(args: argparse.Namespace) -> int:
-    if using_custom_crc_params(args) or using_full_custom_brute(args):
-        if args.algorithm:
-            raise ValueError(
-                "Do not combine --algorithm with custom brute parameters. "
-                "Use either built-in catalog brute or custom brute parameters."
-            )
-        return run_custom_brute(args)
-
-    raw_data = load_input_bytes(args)
-    checksum = parse_checksum_value(args.checksum)
-    expected_crc = checksum.value
-    checksum_width = max(8, args.width or checksum.width_hint)
-    mode_matches, mode_reports, algorithm_names_used = search_catalog(
-        raw_data=raw_data,
-        expected_crc=expected_crc,
-        algorithm_names=args.algorithm,
-        width=args.width,
-        modes=list(BYTE_ORDER_MODES),
-    )
-    skipped_modes = [report for report in mode_reports if report.skipped_reason]
-    tested_modes = [report for report in mode_reports if report.skipped_reason is None]
-    total_tested = sum(report.tested_count for report in tested_modes)
-
-    if not mode_matches:
-        maybe_print_banner(args)
-        print_section("CRC Brute Scan")
-        print_kv("Mode", "built-in-catalog")
-        print_kv("Checksum", format_crc(expected_crc, checksum_width))
-        print_kv("Original data", detect_original_data_kind(args))
-        print_kv(
-            "Tried",
-            f"{total_tested} algorithm/checksum combinations across {len(tested_modes)} input byte-order modes.",
-        )
-        print_error("Brute scan found no catalogued CRC or checksum match.")
-        if algorithm_names_used:
-            print_kv("Algorithms", f"{len(algorithm_names_used)} built-in entries")
-            print_kv("Algorithm set", ", ".join(algorithm_names_used), status="text")
-        for report in tested_modes:
-            print_kv(
-                "Scanned",
-                f"[input:{report.mode}] tested {report.tested_count} algorithm/checksum combinations",
-            )
-        for report in skipped_modes:
-            print_warning(f"Skipped [{report.mode}]: {report.skipped_reason}")
-        return 1
-
-    maybe_print_banner(args)
-    print_section("CRC Brute Scan")
-    print_kv("Mode", "custom-parameters" if using_custom_crc_params(args) else "built-in-catalog")
-    print_kv("Checksum", format_crc(expected_crc, checksum_width))
-    print_kv("Original data", detect_original_data_kind(args))
-    print_kv(
-        "Tried",
-        f"{total_tested} algorithm/checksum combinations across {len(tested_modes)} input byte-order modes.",
-    )
-    if algorithm_names_used:
-        print_kv(
-            "Algorithms",
-            f"{len(algorithm_names_used)} built-in entries",
-        )
-        print_kv("Algorithm set", ", ".join(algorithm_names_used), status="text")
-    for report in tested_modes:
-        print_kv(
-            "Scanned",
-            f"[input:{report.mode}] tested {report.tested_count} algorithm/checksum combinations",
-        )
-    for report in skipped_modes:
-        print_warning(f"Skipped [{report.mode}]: {report.skipped_reason}")
-    print_kv("Matches", str(len(mode_matches)), status="success")
-    for match in mode_matches:
-        print_kv(
-            "Match",
-            f"[input:{match.input_mode}][crc:{match.crc_mode}] {match.description}",
-            status="success",
-        )
-    return 0
-
-
-def run_custom_brute(args: argparse.Namespace) -> int:
-    if args.progress_interval < 0:
-        raise ValueError("--progress-interval must be 0 or greater.")
-
-    checksum = parse_checksum_value(args.checksum)
-    expected_crc = checksum.value
+    if not using_custom_crc(args):
+        return None
+    if args.width is None:
+        raise CliError("Custom CRC parameters need --width.", hint="For example: --width 16 --poly 0x1021")
+    if args.poly is None:
+        raise CliError("Custom CRC parameters need --poly.", hint="For example: --width 16 --poly 0x1021")
     width = args.width
-    width_inferred = False
-    if width is None:
-        if not using_full_custom_brute(args):
-            raise ValueError("Custom brute mode requires --width unless --full-custom is used.")
-        width = checksum.width_hint
-        width_inferred = True
     if width <= 0:
-        raise ValueError("Width must be positive.")
-
-    raw_data = load_input_bytes(args)
+        raise CliError("--width must be positive.")
     mask = (1 << width) - 1
-
-    full_custom = using_full_custom_brute(args)
-    if args.poly is None and not full_custom:
-        raise ValueError("Custom brute mode requires --poly unless --full-custom is used.")
-
-    poly_count = len(parse_value_spec(args.poly, mask, "poly")) if args.poly is not None else mask + 1
-    init_count = len(parse_value_spec(args.init, mask, "init")) if args.init is not None else (mask + 1 if full_custom else 1)
-    xor_count = len(parse_value_spec(args.xor_out, mask, "xor-out")) if args.xor_out is not None else (mask + 1 if full_custom else 1)
-    refin_values = parse_reflect_option(args.refin or "auto")
-    refout_values = parse_reflect_option(args.refout or "auto")
-    crc_variants = checksum_variants(expected_crc, width)
-
-    prepared_modes: List[Tuple[str, bytes]] = []
-    skipped_modes: List[ModeReport] = []
-    for mode in BYTE_ORDER_MODES:
-        try:
-            prepared_modes.append((mode, transform_byte_order(raw_data, mode)))
-        except ValueError as error:
-            skipped_modes.append(ModeReport(mode=mode, tested_count=0, skipped_reason=str(error)))
-
-    configs_per_mode = (
-        poly_count
-        * init_count
-        * xor_count
-        * len(refin_values)
-        * len(refout_values)
-    )
-    estimated = len(prepared_modes) * configs_per_mode * len(crc_variants)
-    if estimated > args.max_combinations:
-        width_note = f" Inferred width is {width} bits from the checksum." if width_inferred else ""
-        raise ValueError(
-            "Custom brute search is too large. "
-            f"Estimated {estimated} combinations exceeds limit {args.max_combinations}."
-            f"{width_note} Narrow --poly/--init/--xor-out, use a smaller width, or raise --max-combinations."
-        )
-
-    poly_values = (
-        parse_value_spec(args.poly, mask, "poly")
-        if args.poly is not None
-        else range(mask + 1)
-    )
-    init_values = (
-        parse_value_spec(args.init, mask, "init")
-        if args.init is not None
-        else (range(mask + 1) if full_custom else [0])
-    )
-    xor_values = (
-        parse_value_spec(args.xor_out, mask, "xor-out")
-        if args.xor_out is not None
-        else (range(mask + 1) if full_custom else [0])
+    poly = single_value(args.poly, mask, "poly")
+    init = single_value(args.init or "0", mask, "init")
+    xor_out = single_value(args.xor_out or "0", mask, "xor-out")
+    validate_params(width, poly, init, xor_out)
+    return CrcAlgorithm(
+        "custom",
+        width,
+        poly,
+        init,
+        xor_out,
+        parse_reflect_value(args.refin, "--refin"),
+        parse_reflect_value(args.refout, "--refout"),
     )
 
-    matches: List[MatchReport] = []
-    mode_reports: List[ModeReport] = []
-    progress_enabled = estimated > 0 and args.progress_interval > 0
-    processed_tests = 0
-    start_time = time.monotonic()
-    last_progress_time = start_time
-    last_reported_tests = -1
 
-    maybe_print_banner(args)
-    print_section("CRC Brute Scan")
-    print_kv("Mode", "custom-parameters")
-    print_kv("Checksum", format_crc(expected_crc, max(8, width)))
-    if width_inferred:
-        print_kv("Width", f"{width} bits (inferred from checksum)")
+def single_value(raw_value: str, mask: int, label: str) -> int:
+    values = parse_value_spec(raw_value, mask, label)
+    if len(values) != 1:
+        raise CliError(f"--{label} must be a single value here, not a list or range.")
+    return values[0]
+
+
+def take_algorithm(
+    args: argparse.Namespace,
+    items: Sequence[str],
+    rest_names: Sequence[str],
+    optional: int = 0,
+    command: str = "",
+) -> tuple[Algorithm, list[str]]:
+    """Resolve the algorithm from ``--algorithm``, custom flags or the first positional value."""
+    custom = custom_algorithm(args)
+    named = getattr(args, "algorithm", None)
+    if custom is not None and named:
+        raise CliError("Use either --algorithm or custom parameters, not both.")
+    if custom is not None:
+        algorithm: Algorithm = custom
+        rest = list(items)
+    elif named:
+        algorithm = get_algorithm(named)
+        rest = list(items)
     else:
-        print_kv("Width", f"{width} bits")
-    print_kv("Original data", detect_original_data_kind(args))
-    print_kv(
-        "Parameter space",
-        f"poly={poly_count}, init={init_count}, xor_out={xor_count}, "
-        f"refin={len(refin_values)}, refout={len(refout_values)}, crc_variants={len(crc_variants)}",
-    )
-    print_kv(
-        "Estimated",
-        f"{estimated} custom parameter/checksum combinations across {len(prepared_modes)} input byte-order modes.",
-    )
-    for report in skipped_modes:
-        print_warning(f"Skipped [{report.mode}]: {report.skipped_reason}")
-    if progress_enabled:
-        print_info(
-            f"Progress tracking enabled. Updates every {args.progress_interval:g}s while the brute scan is running."
+        if not items:
+            raise CliError(
+                "Missing algorithm name.", hint=f"Usage: crcforge {command} <algorithm> {' '.join(rest_names)}"
+            )
+        algorithm = get_algorithm(items[0])
+        rest = list(items[1:])
+    required = len(rest_names) - optional
+    if not required <= len(rest) <= len(rest_names):
+        usage = " ".join(f"<{name}>" for name in rest_names)
+        raise CliError(
+            f"Expected {usage} after the algorithm, got {len(rest)} value{'s' if len(rest) != 1 else ''}.",
+            hint=f"Usage: crcforge {command} <algorithm> {usage}  (or pass --algorithm NAME before the data)",
         )
+    return algorithm, rest
 
-    def maybe_report_progress(mode: str, force: bool = False) -> None:
-        nonlocal last_progress_time
-        nonlocal last_reported_tests
-        if not progress_enabled or estimated == 0:
-            return
-        now = time.monotonic()
-        if not force and (now - last_progress_time) < args.progress_interval:
-            return
-        if force and last_reported_tests == processed_tests:
-            return
-        last_progress_time = now
-        last_reported_tests = processed_tests
-        percent = (processed_tests / estimated) * 100
-        elapsed = now - start_time
-        rate = processed_tests / elapsed if elapsed > 0 else 0.0
-        print_info(
-            f"Progress: {percent:6.2f}% ({processed_tests}/{estimated}) "
-            f"[input:{mode}] at {rate:,.0f} combos/s"
-        )
 
-    for mode, data in prepared_modes:
+def load_data(args: argparse.Namespace) -> bytes:
+    return io_helpers.load_input_bytes(args)
 
-        tested_count = 0
-        for poly in poly_values:
-            for init in init_values:
-                for xor_out in xor_values:
-                    for refin in refin_values:
-                        for refout in refout_values:
-                            algorithm = CrcAlgorithm(
-                                name="manual",
-                                width=width,
-                                poly=poly,
-                                init=init,
-                                xor_out=xor_out,
-                                refin=refin,
-                                refout=refout,
-                            )
-                            calculated = calculate_crc(data, algorithm)
-                            description = describe_manual_params(
-                                width=width,
-                                poly=poly,
-                                init=init,
-                                refin=refin,
-                                refout=refout,
-                                xor_out=xor_out,
-                            )
-                            for crc_mode, candidate_crc in crc_variants:
-                                if calculated == candidate_crc:
-                                    matches.append(
-                                        MatchReport(
-                                            input_mode=mode,
-                                            crc_mode=crc_mode,
-                                            description=description,
-                                        )
-                                    )
-                            tested_count += len(crc_variants)
-                            processed_tests += len(crc_variants)
-                            maybe_report_progress(mode)
-        mode_reports.append(ModeReport(mode=mode, tested_count=tested_count))
-        maybe_report_progress(mode, force=True)
 
-    tested_modes = [report for report in mode_reports if report.skipped_reason is None]
-    total_tested = sum(report.tested_count for report in tested_modes)
-    maybe_report_progress(tested_modes[-1].mode if tested_modes else "none", force=True)
-    print_kv(
-        "Tried",
-        f"{total_tested} custom parameter/checksum combinations across {len(tested_modes)} input byte-order modes.",
+def data_summary(args: argparse.Namespace, data: bytes) -> str:
+    return f"{io_helpers.detect_original_data_kind(args)}, {len(data)} bytes"
+
+
+def emit_input_note(out: Output, args: argparse.Namespace) -> None:
+    note = io_helpers.text_input_note(args)
+    if note:
+        out.note(note)
+
+
+def resolve_jobs(requested: int | None, work: int) -> int:
+    if requested is None or requested == 0:
+        return default_jobs(work)
+    if requested < 0:
+        raise CliError("--jobs must be 0 (auto) or a positive number.")
+    return requested
+
+
+# --- Commands ------------------------------------------------------------------------------
+
+
+def handle_list(args: argparse.Namespace, out: Output) -> int:
+    algorithms = get_algorithms(width=args.width, family=args.family, search=args.search)
+    if not algorithms:
+        out.error("No algorithms match these filters.", hint="Run 'crcforge list' to see the whole catalog.")
+        return EXIT_NO_MATCH
+    if out.json:
+        out.emit_json({"count": len(algorithms), "algorithms": [algorithm_json(a) for a in algorithms]})
+        return EXIT_OK
+    if out.quiet:
+        for algorithm in algorithms:
+            out.value(algorithm.name)
+        return EXIT_OK
+
+    crc_count = sum(1 for algorithm in algorithms if algorithm.family == "crc")
+    alias_count = sum(len(algorithm.aliases) for algorithm in algorithms)
+    out.section("Built-in CRC & Checksum Catalog")
+    out.kv(
+        "Algorithms",
+        f"{len(algorithms)} ({plural(crc_count, 'CRC')}, {plural(len(algorithms) - crc_count, 'checksum')})",
     )
-    for report in tested_modes:
-        print_kv(
-            "Scanned",
-            f"[input:{report.mode}] tested {report.tested_count} custom parameter/checksum combinations",
-        )
+    out.kv("Aliases", str(alias_count))
+    out.kv("Names total", str(len(algorithms) + alias_count))
+    filters = [
+        f"width={args.width}" if args.width else "",
+        f"family={args.family}" if args.family else "",
+        f"search={args.search}" if args.search else "",
+    ]
+    if any(filters):
+        out.kv("Filters", ", ".join(item for item in filters if item))
+    for algorithm in algorithms:
+        out.kv("Algorithm", algorithm.describe(), status="text")
+        if args.aliases and algorithm.aliases:
+            out.kv("Aliases", ", ".join(algorithm.aliases), status="text")
+    if not args.aliases:
+        out.note("Add --aliases to show alternative names, or use 'crcforge info <name>' for details.")
+    return EXIT_OK
 
+
+def handle_info(args: argparse.Namespace, out: Output) -> int:
+    algorithm = get_algorithm(args.name)
+    if out.json:
+        out.emit_json(algorithm_json(algorithm))
+        return EXIT_OK
+    if out.quiet:
+        out.value(algorithm.describe())
+        return EXIT_OK
+    out.section("Algorithm Info")
+    out.kv("Name", algorithm.name)
+    out.kv("Family", algorithm.family)
+    if algorithm.aliases:
+        out.kv("Aliases", ", ".join(algorithm.aliases))
+    for key, value in algorithm.params().items():
+        out.kv(key, str(value).lower() if isinstance(value, bool) else value, status="text")
+    if algorithm.check is not None:
+        out.kv("Check", f"{format_value(algorithm.check, algorithm.width)} for the ASCII string 123456789")
+    if isinstance(algorithm, CrcAlgorithm):
+        out.kv("Residue", format_value(calculate_residue(algorithm), algorithm.width))
+        out.kv("RevEng spec", algorithm.reveng_spec())
+        if algorithm.reveng_name:
+            status = f" ({algorithm.status})" if algorithm.status else ""
+            out.kv("RevEng name", f"{algorithm.reveng_name}{status}")
+        if algorithm.reference_url:
+            out.kv("Reference", algorithm.reference_url)
+    return EXIT_OK
+
+
+def handle_calc(args: argparse.Namespace, out: Output) -> int:
+    if args.all:
+        return calc_all(args, out)
+    if args.width is not None and not using_custom_crc(args) and not using_custom_sum(args) and not args.algorithm:
+        raise CliError(
+            "--width needs --poly (custom CRC), --sum (custom sum checksum) or --all.",
+            hint="Example: crcforge calc 123456789 --width 16 --poly 0x1021",
+        )
+    algorithm, rest = take_algorithm(args, args.calc_items, ("original-data",), command="calc")
+    args.original_data = rest[0]
+    data = transform_byte_order(load_data(args), args.byte_order)
+    value = algorithm.compute(data)
+    custom = algorithm.name.startswith("custom")
+
+    if out.json:
+        payload: dict[str, object] = {"algorithm": algorithm_json(algorithm), **value_json(value, algorithm.width)}
+        payload.update({"data_length": len(data), "byte_order": args.byte_order})
+        out.emit_json(payload)
+        return EXIT_OK
+    if out.quiet:
+        out.value(
+            format_crc_result(value, algorithm.width, args.output_format if args.output_format != "both" else "hex")
+        )
+        return EXIT_OK
+
+    out.section("CRC Calculation" if algorithm.family == "crc" else "Checksum Calculation")
+    out.kv("Mode", "custom-parameters" if custom else "built-in")
+    out.kv("Original data", io_helpers.detect_original_data_kind(args))
+    out.kv("Data length", f"{len(data)} bytes")
+    out.kv("Byte order", f"{args.byte_order} ({describe_byte_order(args.byte_order)})")
+    if custom:
+        out.kv("Parameters", describe_params(algorithm))
+    else:
+        out.kv("Algorithm", algorithm.describe())
+    out.kv("Result", format_crc_result(value, algorithm.width, args.output_format), status="success")
+    emit_input_note(out, args)
+    return EXIT_OK
+
+
+def calc_all(args: argparse.Namespace, out: Output) -> int:
+    if len(args.calc_items) != 1:
+        raise CliError("--all takes exactly one original-data value.", hint="Example: crcforge calc 123456789 --all")
+    if using_custom_crc(args) or using_custom_sum(args) or args.algorithm:
+        raise CliError("--all cannot be combined with --algorithm or custom parameters.")
+    args.original_data = args.calc_items[0]
+    data = transform_byte_order(load_data(args), args.byte_order)
+    algorithms = get_algorithms(width=args.width, family=args.family)
+    results = [(algorithm, algorithm.compute(data)) for algorithm in algorithms]
+    if out.json:
+        out.emit_json(
+            {
+                "data_length": len(data),
+                "results": [{"name": a.name, "width": a.width, **value_json(v, a.width)} for a, v in results],
+            }
+        )
+        return EXIT_OK
+    name_width = max((len(algorithm.name) for algorithm, _ in results), default=10)
+    if out.quiet:
+        for algorithm, value in results:
+            out.value(f"{algorithm.name} {format_value(value, algorithm.width)}")
+        return EXIT_OK
+    out.section("All Catalog Results")
+    out.kv("Original data", data_summary(args, data))
+    out.kv("Algorithms", str(len(results)))
+    for algorithm, value in results:
+        out.line(f"  {algorithm.name:{name_width}}  {format_crc_result(value, algorithm.width, args.output_format)}")
+    emit_input_note(out, args)
+    return EXIT_OK
+
+
+def catalog_search(
+    data: bytes,
+    expected: int,
+    modes: Sequence[str],
+    names: Sequence[str] | None,
+    width: int | None,
+    family: str | None,
+) -> tuple[list[tuple[str, str, Algorithm]], list[tuple[str, str]], int, int]:
+    """Match one sample against the catalog across byte-order views and checksum byte swaps."""
+    matches: list[tuple[str, str, Algorithm]] = []
+    skipped: list[tuple[str, str]] = []
+    tested = 0
+    scanned_modes = 0
+    algorithms = get_algorithms(names=names, width=width, family=family)
+    for mode, datasets, reason in distinct_views([data], modes):
+        if datasets is None:
+            skipped.append((mode, reason or ""))
+            continue
+        scanned_modes += 1
+        for algorithm in algorithms:
+            if expected > algorithm.mask:
+                continue
+            value = algorithm.compute(datasets[0])
+            for crc_mode, candidate in checksum_variants(expected, algorithm.width):
+                tested += 1
+                if value == candidate:
+                    matches.append((mode, crc_mode, algorithm))
+    return matches, skipped, tested, scanned_modes
+
+
+def ordered_modes(primary: str, scan_all: bool) -> list[str]:
+    if not scan_all:
+        return [primary]
+    return [primary, *(mode for mode in BYTE_ORDER_MODES if mode != primary)]
+
+
+def matches_json(matches: Sequence[tuple[str, str, Algorithm]]) -> list[dict[str, object]]:
+    return [
+        {"input_mode": mode, "crc_mode": crc_mode, "algorithm": algorithm_json(algorithm)}
+        for mode, crc_mode, algorithm in matches
+    ]
+
+
+def handle_find(args: argparse.Namespace, out: Output) -> int:
+    data = load_data(args)
+    checksum = parse_checksum_value(args.checksum)
+    display_width = max(8, args.width or checksum.width_hint)
+    matches, skipped, _, _ = catalog_search(
+        data,
+        checksum.value,
+        ordered_modes(args.byte_order, args.scan_byte_order),
+        args.algorithm,
+        args.width,
+        args.family,
+    )
+    if out.json:
+        out.emit_json(
+            {
+                "checksum": format_value(checksum.value, display_width),
+                "data_length": len(data),
+                "matches": matches_json(matches),
+                "skipped_modes": [{"mode": m, "reason": r} for m, r in skipped],
+            }
+        )
+        return EXIT_OK if matches else EXIT_NO_MATCH
+    if out.quiet:
+        for _, _, algorithm in matches:
+            out.value(algorithm.name)
+        return EXIT_OK if matches else EXIT_NO_MATCH
+
+    out.section("CRC Match Search")
+    out.kv("Checksum", format_value(checksum.value, display_width))
+    out.kv("Original data", io_helpers.detect_original_data_kind(args))
+    out.kv("Byte-order scan", "all supported modes" if args.scan_byte_order else args.byte_order)
+    for mode, reason in skipped:
+        out.warn(f"Skipped [{mode}]: {reason}")
     if not matches:
-        print_error("Custom brute scan found no custom CRC match.")
-        return 1
+        out.kv("Matches", "0", status="warn")
+        out.failure("No catalogued CRC or checksum algorithm matched.")
+        hints = []
+        if not args.scan_byte_order:
+            hints.append("--scan-byte-order to try other byte orders")
+        hints.append("'crcforge brute' for custom CRC parameters")
+        hints.append("'crcforge solve' with several samples")
+        out.note("Try " + ", ".join(hints) + ".")
+        emit_input_note(out, args)
+        return EXIT_NO_MATCH
+    out.kv("Matches", str(len(matches)), status="success")
+    show_mode = args.scan_byte_order or args.byte_order != "native"
+    for mode, crc_mode, algorithm in matches:
+        out.kv("Match", f"{mode_tag(mode, crc_mode, show_mode)} {algorithm.describe()}", status="success")
+    coincidence_note(out, 1, display_width, len(matches))
+    emit_input_note(out, args)
+    return EXIT_OK
 
-    print_kv("Matches", str(len(matches)), status="success")
-    for match in matches[: args.limit]:
-        print_kv(
+
+def handle_brute(args: argparse.Namespace, out: Output) -> int:
+    if using_custom_crc(args) or args.full_custom:
+        if args.algorithm:
+            raise CliError("Do not combine --algorithm with custom brute parameters.")
+        return run_custom_brute(args, out)
+
+    data = load_data(args)
+    checksum = parse_checksum_value(args.checksum)
+    display_width = max(8, args.width or checksum.width_hint)
+    matches, skipped, tested, scanned = catalog_search(
+        data, checksum.value, BYTE_ORDER_MODES, args.algorithm, args.width, args.family
+    )
+    algorithm_names = [a.name for a in get_algorithms(names=args.algorithm, width=args.width, family=args.family)]
+    if out.json:
+        out.emit_json(
+            {
+                "mode": "built-in-catalog",
+                "checksum": format_value(checksum.value, display_width),
+                "data_length": len(data),
+                "tested": tested,
+                "matches": matches_json(matches),
+                "skipped_modes": [{"mode": m, "reason": r} for m, r in skipped],
+            }
+        )
+        return EXIT_OK if matches else EXIT_NO_MATCH
+    if out.quiet:
+        for _, _, algorithm in matches:
+            out.value(algorithm.name)
+        return EXIT_OK if matches else EXIT_NO_MATCH
+
+    out.section("CRC Brute Scan")
+    out.kv("Mode", "built-in-catalog")
+    out.kv("Checksum", format_value(checksum.value, display_width))
+    out.kv("Original data", data_summary(args, data))
+    out.kv("Tried", f"{tested} algorithm/checksum combinations across {scanned} input byte-order modes.")
+    out.kv("Algorithms", f"{len(algorithm_names)} built-in entries")
+    for mode, reason in skipped:
+        out.warn(f"Skipped [{mode}]: {reason}")
+    if not matches:
+        out.failure("Brute scan found no catalogued CRC or checksum match.")
+        out.note("For a custom CRC, add --poly SPEC or --full-custom; with several samples use 'crcforge solve'.")
+        emit_input_note(out, args)
+        return EXIT_NO_MATCH
+    out.kv("Matches", str(len(matches)), status="success")
+    for mode, crc_mode, algorithm in matches:
+        out.kv("Match", f"{mode_tag(mode, crc_mode)} {algorithm.describe()}", status="success")
+    coincidence_note(out, 1, display_width, len(matches))
+    emit_input_note(out, args)
+    return EXIT_OK
+
+
+def run_custom_brute(args: argparse.Namespace, out: Output) -> int:
+    if args.progress_interval < 0:
+        raise CliError("--progress-interval must be 0 or greater.")
+    if args.limit <= 0:
+        raise CliError("--limit must be positive.")
+    checksum = parse_checksum_value(args.checksum)
+    width = args.width
+    width_note = None
+    if width is None:
+        if not args.full_custom:
+            raise CliError("Custom brute mode needs --width.", hint="Pass --width N, or use --full-custom to infer it.")
+        width = checksum.width_hint
+        width_note = f"inferred from {checksum.width_reason()}; pass --width to override"
+    if width <= 0:
+        raise CliError("--width must be positive.")
+    mask = (1 << width) - 1
+    if checksum.value > mask:
+        raise CliError(f"Checksum {format_value(checksum.value, width)} does not fit in {width} bits.")
+
+    if args.poly is not None:
+        polys: Sequence[int] = parse_value_spec(args.poly, mask, "poly")
+    elif width <= 16:
+        polys = range(mask + 1)
+    else:
+        raise CliError(
+            f"Scanning all 2^{width} polynomials is not practical.",
+            hint="Pass --poly, or run 'crcforge solve' with two or more samples of the same length; "
+            "it derives the polynomial directly.",
+        )
+    init_values = parse_value_spec(args.init, mask, "init") if args.init else (None if args.full_custom else [0])
+    xorout_values = (
+        parse_value_spec(args.xor_out, mask, "xor-out") if args.xor_out else (None if args.full_custom else [0])
+    )
+    conventional = False
+    if init_values is None and xorout_values is None:
+        init_values = xorout_values = sorted({0, mask})
+        conventional = True
+    reflections = [
+        (refin, refout)
+        for refin in parse_reflect_option(args.refin or "auto")
+        for refout in parse_reflect_option(args.refout or "auto")
+    ]
+
+    data = load_data(args)
+    views: list[ScanView] = []
+    skipped: list[tuple[str, str]] = []
+    for mode, datasets, reason in distinct_views([data], BYTE_ORDER_MODES):
+        if datasets is None:
+            skipped.append((mode, reason or ""))
+            continue
+        for crc_mode, value in checksum_variants(checksum.value, width):
+            views.append((mode, crc_mode, (Sample(datasets[0], value),)))
+
+    work = len(polys) * len(reflections) * len(views)
+    if work > args.max_combinations:
+        raise CliError(
+            f"This search needs {work:,} evaluations, above the limit of {args.max_combinations:,}.",
+            hint="Narrow --poly, fix --refin/--refout, or raise --max-combinations.",
+        )
+    init_count = len(init_values) if init_values is not None else mask + 1
+    xorout_count = len(xorout_values) if xorout_values is not None else mask + 1
+    chance = expected_chance_matches(len(polys), len(reflections) * len(views), init_count, xorout_count, width, 1)
+    if init_values is not None and len(init_values) <= ENUMERATE_LIMIT:
+        solved = f"init={len(init_values)} value(s), xorout=solved directly"
+    elif xorout_values is not None and len(xorout_values) <= ENUMERATE_LIMIT:
+        solved = f"xorout={len(xorout_values)} value(s), init=solved directly"
+    else:
+        solved = "init and xorout solved jointly"
+    jobs = resolve_jobs(args.jobs, work * max(1, width // 4))
+
+    if out.human:
+        out.section("CRC Brute Scan")
+        out.kv("Mode", "custom-parameters")
+        out.kv("Checksum", format_value(checksum.value, max(8, width)))
+        out.kv("Width", f"{width} bits" + (f" ({width_note})" if width_note else ""))
+        out.kv("Original data", data_summary(args, data))
+        out.kv("Search space", f"poly={len(polys)}, {solved}, refin/refout={len(reflections)}")
+        out.kv(
+            "Evaluations",
+            f"{work:,} across {len(views)} input/checksum views" + (f", {jobs} workers" if jobs > 1 else ""),
+        )
+        for mode, reason in skipped:
+            out.warn(f"Skipped [{mode}]: {reason}")
+        if conventional:
+            out.note(
+                "With one sample, a free init and a free xorout fit every polynomial, so both were limited to "
+                "0 and all-ones. Pass --init/--xor-out ranges to widen this, or use 'crcforge solve' with more samples."
+            )
+        if chance > 1:
+            out.warn(
+                f"Expect about {chance:,.0f} coincidental matches: one {width}-bit sample cannot single out "
+                "these parameters. Add samples with 'crcforge solve' or narrow the search."
+            )
+
+    progress = out.progress(args.progress_interval)
+    scan = scan_custom(
+        views,
+        width,
+        polys,
+        reflections,
+        init_values,
+        xorout_values,
+        keep=args.limit,
+        jobs=jobs,
+        progress=progress.update,
+    )
+    progress.close()
+
+    if out.json:
+        out.emit_json(
+            {
+                "mode": "custom-parameters",
+                "width": width,
+                "checksum": format_value(checksum.value, width),
+                "evaluations": scan.tested,
+                "match_count": scan.match_count,
+                "expected_chance_matches": chance,
+                "interrupted": scan.interrupted,
+                "matches": [crc_match_json(match) for match in scan.matches],
+            }
+        )
+        return EXIT_INTERRUPTED if scan.interrupted else (EXIT_OK if scan.matches else EXIT_NO_MATCH)
+    if out.quiet:
+        for match in scan.matches:
+            out.value(match.algorithm.reveng_spec())
+        return EXIT_INTERRUPTED if scan.interrupted else (EXIT_OK if scan.matches else EXIT_NO_MATCH)
+
+    out.kv("Tried", f"{scan.tested:,} parameter sets.")
+    if scan.interrupted:
+        out.warn("Interrupted: showing the matches found so far.")
+    if not scan.matches:
+        out.failure("Custom brute scan found no matching CRC parameters.")
+        return EXIT_INTERRUPTED if scan.interrupted else EXIT_NO_MATCH
+    out.kv("Matches", f"{scan.match_count:,}", status="success")
+    for match in scan.matches:
+        out.kv(
             "Match",
-            f"[input:{match.input_mode}][crc:{match.crc_mode}] {match.description}",
+            f"{mode_tag(match.input_mode, match.crc_mode)} {match_label(match.algorithm, match.catalog_name)}",
             status="success",
         )
-    if len(matches) > args.limit:
-        print_kv("Output", f"Limited to first {args.limit} matches.")
-    return 0
+    if scan.match_count > len(scan.matches):
+        out.note(f"Showing the first {len(scan.matches)} matches; raise --limit to see more.")
+    return EXIT_INTERRUPTED if scan.interrupted else EXIT_OK
 
 
-def handle_transform(args: argparse.Namespace) -> int:
-    data = load_input_bytes(args)
+def crc_match_json(match: CrcMatch) -> dict[str, object]:
+    payload: dict[str, object] = {
+        "input_mode": match.input_mode,
+        "crc_mode": match.crc_mode,
+        "params": match.algorithm.params(),
+        "reveng": match.algorithm.reveng_spec(),
+    }
+    if match.catalog_name:
+        payload["catalog_name"] = match.catalog_name
+    if match.free_bits:
+        payload["free_bits"] = match.free_bits
+    return payload
+
+
+def solve_json(result: SolveResult) -> dict[str, object]:
+    return {
+        "width": result.width,
+        "samples": result.sample_count,
+        "lengths": list(result.lengths),
+        "catalog": [
+            {"input_mode": m.input_mode, "crc_mode": m.crc_mode, "algorithm": algorithm_json(m.algorithm)}
+            for m in result.catalog_matches
+        ],
+        "crc": [crc_match_json(match) for match in result.crc_matches],
+        "checksums": [
+            {"input_mode": m.input_mode, "crc_mode": m.crc_mode, "algorithm": algorithm_json(m.algorithm)}
+            for m in result.checksum_matches
+        ],
+        "notes": [*result.notes, *result.derived_notes],
+    }
+
+
+def group_crc_matches(matches: Sequence[CrcMatch]) -> list[list[CrcMatch]]:
+    """Group solutions that differ only in (equivalent) init/xorout pairs."""
+    groups: dict[tuple[int, bool, bool, str, str], list[CrcMatch]] = {}
+    for match in matches:
+        key = (match.algorithm.poly, match.algorithm.refin, match.algorithm.refout, match.input_mode, match.crc_mode)
+        groups.setdefault(key, []).append(match)
+    return list(groups.values())
+
+
+def print_solve_result(out: Output, result: SolveResult, show_modes: bool, all_solutions: bool = False) -> None:
+    def tag(input_mode: str, crc_mode: str) -> str:
+        parts = []
+        if show_modes or input_mode != "native":
+            parts.append(f"input:{input_mode}")
+        if crc_mode != "as-given":
+            parts.append(f"crc:{crc_mode}")
+        return f"[{']['.join(parts)}] " if parts else ""
+
+    for match in result.catalog_matches:
+        out.kv("Catalog CRC", f"{tag(match.input_mode, match.crc_mode)}{match.algorithm.describe()}", status="success")
+
+    groups = group_crc_matches(visible_crc_matches(result))
+    catalog_checksums = [m for m in result.checksum_matches if not m.algorithm.name.startswith("custom")]
+    layouts = [m for m in result.checksum_matches if m.algorithm.name.startswith("custom")]
+    known = bool(result.catalog_matches or catalog_checksums)
+
+    if groups and known and not all_solutions:
+        out.kv(
+            "Other fits",
+            f"{plural(len(groups), 'other CRC parameter set')} also fit these samples; "
+            "they are most likely coincidences.",
+            status="dim",
+        )
+        out.detail("List them with --all-solutions or --json; more or longer samples rule them out.", status="dim")
+        derived_notes: list[str] = []
+    else:
+        derived_notes = result.derived_notes
+        shown = groups if all_solutions else groups[:DERIVED_DISPLAY_LIMIT]
+        for group in shown:
+            first = group[0]
+            spec = first.algorithm.reveng_spec()
+            out.kv("Derived CRC", f"{tag(first.input_mode, first.crc_mode)}{spec}", status="success")
+            if first.catalog_name:
+                out.detail(f"= {first.catalog_name} (built-in)")
+            for twin in group[1:]:
+                pair = f"init=0x{twin.algorithm.init:X} xorout=0x{twin.algorithm.xor_out:X}"
+                out.detail(f"or {pair} (equivalent)", status="dim")
+            if first.free_bits and len(group) == 1:
+                out.detail("init/xorout: one of several equivalent pairs for these samples", status="dim")
+        if len(groups) > len(shown):
+            out.note(f"{len(groups) - len(shown)} more CRC parameter sets fit; use --all-solutions or --json.")
+        if len(groups) > 1 and not known:
+            out.warn("Several different CRCs fit these samples. Add more (and longer) samples to tell them apart.")
+
+    for match in catalog_checksums:
+        out.kv("Checksum", f"{tag(match.input_mode, match.crc_mode)}{match.algorithm.describe()}", status="success")
+    if layouts and (known or groups) and not all_solutions:
+        out.kv(
+            "Other fits", f"{plural(len(layouts), 'sum/XOR layout')} also fit; most likely coincidences.", status="dim"
+        )
+    else:
+        for match in layouts if all_solutions else layouts[:DERIVED_DISPLAY_LIMIT]:
+            out.kv(
+                "Checksum", f"{tag(match.input_mode, match.crc_mode)}{match_label(match.algorithm)}", status="success"
+            )
+    for mode, reason in result.skipped_modes:
+        out.note(f"Skipped [{mode}]: {reason}")
+    for note in [*result.notes, *derived_notes]:
+        out.note(note)
+
+
+def solve_settings(args: argparse.Namespace, width: int) -> dict[str, object]:
+    mask = (1 << width) - 1
+    return {
+        "poly_values": parse_value_spec(args.poly, mask, "poly") if args.poly else None,
+        "init_values": parse_value_spec(args.init, mask, "init") if args.init else None,
+        "xorout_values": parse_value_spec(args.xor_out, mask, "xor-out") if args.xor_out else None,
+        "reflections": [
+            (refin, refout)
+            for refin, refout in REFLECTION_COMBOS
+            if refin in parse_reflect_option(args.refin or "auto")
+            and refout in parse_reflect_option(args.refout or "auto")
+        ],
+        "byte_order_modes": BYTE_ORDER_MODES if args.scan_byte_order else ("native",),
+        "limit": args.limit,
+    }
+
+
+def handle_solve(args: argparse.Namespace, out: Output) -> int:
+    values = list(args.samples)
+    if args.samples_file:
+        values.extend(io_helpers.read_lines(args.samples_file))
+    if not values:
+        raise CliError(
+            "No samples given.",
+            hint="Pass samples as DATA:CHECKSUM (or frames with --frames), or use --samples-file FILE.",
+        )
+    if args.frames:
+        return solve_frames(args, out, [io_helpers.parse_frame(value) for value in values])
+
+    parsed = [io_helpers.parse_sample(value) for value in values]
+    width = args.width
+    width_note = None
+    if width is None:
+        hint_sample = max(parsed, key=lambda item: item[1].width_hint)[1]
+        width = hint_sample.width_hint
+        width_note = f"inferred from {hint_sample.width_reason()}; pass --width to override"
+    samples = [Sample(data, checksum.value) for data, checksum in parsed]
+    progress = out.progress(args.progress_interval)
+    result = solve(samples, width, progress=progress.update, **solve_settings(args, width))  # type: ignore[arg-type]
+    progress.close()
+
+    if out.json:
+        out.emit_json(solve_json(result))
+        return EXIT_OK if result.found else EXIT_NO_MATCH
+    if out.quiet:
+        quiet_solve(out, result, args.all_solutions)
+        return EXIT_OK if result.found else EXIT_NO_MATCH
+
+    out.section("CRC Solver")
+    lengths = ", ".join(str(length) for length in result.lengths)
+    out.kv("Samples", f"{result.sample_count} (lengths: {lengths} bytes)")
+    out.kv("Width", f"{width} bits" + (f" ({width_note})" if width_note else ""))
+    if result.sample_count == 1:
+        out.warn("Only one sample: matches may be coincidental. Add more samples to confirm.")
+    if not result.found:
+        out.failure("No CRC or checksum fits every sample.")
+        out.note(
+            "Check that the checksums belong to the data, try --scan-byte-order, another --width, "
+            "or use --frames if the checksum is inside the data."
+        )
+        for note in result.notes:
+            out.note(note)
+        return EXIT_NO_MATCH
+    print_solve_result(out, result, args.scan_byte_order, args.all_solutions)
+    if result.sample_count == 2 and width <= 16:
+        out.note("Two samples leave room for coincidences at this width; a third sample confirms the result.")
+    return EXIT_OK
+
+
+def visible_crc_matches(result: SolveResult) -> list[CrcMatch]:
+    """Derived CRCs worth showing next to the catalog matches.
+
+    A derived CRC that is a catalog match is already listed. When init/xorout are ambiguous
+    (same-length samples), pairs equivalent to a catalog match add nothing either.
+    """
+    catalog = [m for m in result.catalog_matches if isinstance(m.algorithm, CrcAlgorithm)]
+    visible = []
+    for crc in result.crc_matches:
+        if crc.catalog_name and any(m.algorithm.name == crc.catalog_name for m in catalog):
+            continue
+        if crc.free_bits and any(
+            isinstance(m.algorithm, CrcAlgorithm)
+            and (m.algorithm.poly, m.algorithm.refin, m.algorithm.refout)
+            == (crc.algorithm.poly, crc.algorithm.refin, crc.algorithm.refout)
+            and m.input_mode == crc.input_mode
+            and m.crc_mode == crc.crc_mode
+            for m in catalog
+        ):
+            continue
+        visible.append(crc)
+    return visible
+
+
+def quiet_solve(out: Output, result: SolveResult, all_solutions: bool = False) -> None:
+    """Catalog names first; derived parameters and layouts only when nothing in the catalog fits."""
+    catalog_checksums = [m for m in result.checksum_matches if not m.algorithm.name.startswith("custom")]
+    for match in [*result.catalog_matches, *catalog_checksums]:
+        out.value(match.algorithm.name)
+    if (result.catalog_matches or catalog_checksums) and not all_solutions:
+        return
+    for group in group_crc_matches(visible_crc_matches(result)):
+        out.value(group[0].algorithm.reveng_spec())
+    for match in result.checksum_matches:
+        if match.algorithm.name.startswith("custom"):
+            out.value(describe_params(match.algorithm))
+
+
+def solve_frames(args: argparse.Namespace, out: Output, frames: list[bytes]) -> int:
+    widths = [args.width] if args.width else list(DEFAULT_FRAME_WIDTHS)
+    positions = list(POSITIONS) if args.crc_at == "auto" else [args.crc_at]
+    endians = ["big", "little"] if args.crc_endian == "auto" else [args.crc_endian]
+    skips = list(range(9)) if args.skip == "auto" else [io_helpers.parse_number(args.skip, "skip")]
+    layouts = candidate_layouts(widths, positions, endians, skips)
+    progress = out.progress(args.progress_interval)
+    found: list[tuple[FrameLayout, SolveResult]] = []
+    for index, layout in enumerate(layouts):
+        progress.update(index, len(layouts), layout.describe())
+        try:
+            samples = layout.split_all(frames)
+        except ValueError:
+            continue
+        if any(not sample.data for sample in samples):
+            continue
+        result = solve(samples, layout.width, swap_checksums=False, **solve_settings(args, layout.width))  # type: ignore[arg-type]
+        if result.found:
+            found.append((layout, result))
+    progress.close()
+
+    if out.json:
+        out.emit_json(
+            {
+                "frames": len(frames),
+                "layouts_tested": len(layouts),
+                "layouts": [{"layout": layout.as_dict(), **solve_json(result)} for layout, result in found],
+            }
+        )
+        return EXIT_OK if found else EXIT_NO_MATCH
+    if out.quiet:
+        for layout, result in found:
+            out.value(f"# {layout.describe()}")
+            quiet_solve(out, result, args.all_solutions)
+        return EXIT_OK if found else EXIT_NO_MATCH
+
+    out.section("CRC Solver (frames)")
+    sizes = sorted({len(frame) for frame in frames})
+    out.kv("Frames", f"{len(frames)} (lengths: {', '.join(map(str, sizes))} bytes)")
+    out.kv("Layouts tested", str(len(layouts)))
+    if len(frames) == 1:
+        out.warn("Only one frame: matches may be coincidental. Add more frames to confirm.")
+    if not found:
+        out.failure("No layout produced a CRC or checksum that fits every frame.")
+        out.note("Try --crc-at auto, --crc-endian auto, --skip auto, or a specific --width.")
+        return EXIT_NO_MATCH
+    for layout, result in found:
+        out.kv("Layout", layout.describe(), status="info")
+        print_solve_result(out, result, args.scan_byte_order, args.all_solutions)
+    return EXIT_OK
+
+
+def handle_verify(args: argparse.Namespace, out: Output) -> int:
+    rest_names = ("original-data",) if args.frame else ("original-data", "checksum")
+    algorithm, rest = take_algorithm(args, args.items, rest_names, command="verify")
+    args.original_data = rest[0]
+    data = load_data(args)
+    width = algorithm.width
+
+    if args.frame:
+        endians = ["big", "little"] if args.crc_endian == "auto" else [args.crc_endian]
+        attempts = []
+        for endian in endians if (width + 7) // 8 > 1 else ["big"]:
+            layout = FrameLayout(width, args.crc_at, endian, args.skip)
+            sample = layout.split(data)
+            actual = algorithm.compute(transform_byte_order(sample.data, args.byte_order))
+            attempts.append((layout, sample, actual))
+        valid = [attempt for attempt in attempts if attempt[1].checksum == attempt[2]]
+        layout, sample, actual = (valid or attempts)[0]
+        expected_value, given = actual, sample.checksum
+        description = layout.describe()
+        ok = bool(valid)
+        swapped = False
+    else:
+        given = parse_checksum_value(rest[1]).value
+        expected_value = algorithm.compute(transform_byte_order(data, args.byte_order))
+        ok = expected_value == given
+        swapped = not ok and any(value == expected_value for mode, value in checksum_variants(given, width)[1:])
+        description = None
+
+    if out.json:
+        payload: dict[str, object] = {
+            "valid": ok,
+            "algorithm": algorithm.name,
+            "expected": format_value(expected_value, width),
+            "given": format_value(given, width),
+        }
+        if description:
+            payload["layout"] = description
+        if swapped:
+            payload["matches_byte_swapped"] = True
+        out.emit_json(payload)
+        return EXIT_OK if ok else EXIT_NO_MATCH
+    if out.quiet:
+        out.value("valid" if ok else "invalid")
+        return EXIT_OK if ok else EXIT_NO_MATCH
+
+    out.section("Checksum Verification")
+    out.kv("Algorithm", algorithm.describe() if not algorithm.name.startswith("custom") else describe_params(algorithm))
+    out.kv("Original data", data_summary(args, data))
+    if description:
+        out.kv("Frame layout", description)
+    out.kv("Given", format_value(given, width))
+    out.kv("Calculated", format_value(expected_value, width))
+    if ok:
+        out.kv("Result", "VALID", status="success")
+        return EXIT_OK
+    out.kv("Result", "INVALID", status="error")
+    if swapped:
+        out.note("The checksum matches if its bytes are swapped: it is probably stored in the other byte order.")
+    elif args.frame and args.crc_endian != "auto":
+        out.note("Try --crc-endian auto to accept either byte order.")
+    return EXIT_NO_MATCH
+
+
+def handle_forge(args: argparse.Namespace, out: Output) -> int:
+    algorithm, rest = take_algorithm(args, args.items, ("original-data", "target"), command="forge")
+    args.original_data = rest[0]
+    data = load_data(args)
+    target = parse_checksum_value(rest[1]).value
+    offset = parse_offset(args.at, len(data)) if args.at is not None else None
+    result = forge(data, algorithm, target, offset=offset, overwrite=args.overwrite, patch_size=args.patch_size)
+    if args.output:
+        Path(args.output).write_bytes(result.data)
+
+    if out.json:
+        out.emit_json(
+            {
+                "algorithm": algorithm.name,
+                "target": format_value(target, algorithm.width),
+                "offset": result.offset,
+                "mode": "overwrite" if result.overwrite else "insert",
+                "patch": result.patch.hex().upper(),
+                "data": result.data.hex().upper(),
+                "written_to": args.output,
+            }
+        )
+        return EXIT_OK
+    if out.quiet:
+        out.value(format_bytes(result.data, args.output_format or "compact-hex"))
+        return EXIT_OK
+
+    out.section("Forge")
+    out.kv("Algorithm", algorithm.describe() if not algorithm.name.startswith("custom") else describe_params(algorithm))
+    out.kv("Original data", data_summary(args, data))
+    out.kv("Target", format_value(target, algorithm.width))
+    action = "overwrote" if result.overwrite else "inserted"
+    out.kv("Patch", f"{format_bytes(result.patch, 'hex')} ({action} at offset {result.offset})", status="success")
+    rendered = format_bytes(result.data, args.output_format or "hex")
+    if len(result.data) > 64 and not args.output_format:
+        rendered = format_bytes(result.data[:64], "hex") + f" ... ({len(result.data)} bytes)"
+    out.kv("Forged data", rendered)
+    out.kv("Verified", f"{format_value(algorithm.compute(result.data), algorithm.width)} == target", status="success")
+    if args.output:
+        out.kv("Written to", args.output)
+    return EXIT_OK
+
+
+def handle_records(args: argparse.Namespace, out: Output) -> int:
+    if args.file == "-":
+        text = sys.stdin.read()
+    else:
+        try:
+            text = Path(args.file).read_text(encoding="ascii", errors="replace")
+        except FileNotFoundError:
+            raise CliError(f"File not found: {args.file}") from None
+    report = check_records(text)
+    issues = report.issues
+    address_range = None
+    if report.lowest_address is not None and report.highest_address is not None:
+        address_range = f"0x{report.lowest_address:08X}-0x{report.highest_address:08X}"
+
+    if out.json:
+        out.emit_json(
+            {
+                "format": report.format,
+                "valid": report.ok,
+                "records": report.records,
+                "data_bytes": report.data_bytes,
+                "address_range": address_range,
+                "record_types": report.types,
+                "issues": [
+                    {
+                        "line": issue.line,
+                        "message": issue.message,
+                        **({"expected": f"0x{issue.expected:02X}"} if issue.expected is not None else {}),
+                        **({"actual": f"0x{issue.actual:02X}"} if issue.actual is not None else {}),
+                    }
+                    for issue in issues
+                ],
+            }
+        )
+        return EXIT_OK if report.ok else EXIT_NO_MATCH
+    if out.quiet:
+        out.value("valid" if report.ok else f"invalid ({len(issues)} issues)")
+        return EXIT_OK if report.ok else EXIT_NO_MATCH
+
+    out.section("Record File Check")
+    out.kv("Format", "Intel HEX" if report.format == "intel-hex" else "Motorola S-record")
+    out.kv("Records", str(report.records))
+    out.kv("Data bytes", str(report.data_bytes))
+    if address_range:
+        out.kv("Address range", address_range)
+    if report.types:
+        out.kv("Record types", ", ".join(f"{name}={count}" for name, count in sorted(report.types.items())))
+    if report.ok:
+        out.kv("Result", "VALID: every record checksum is correct", status="success")
+        return EXIT_OK
+    out.kv("Result", f"INVALID: {len(issues)} issue{'s' if len(issues) != 1 else ''}", status="error")
+    for issue in issues[:MATCH_DISPLAY_LIMIT]:
+        where = f"line {issue.line}" if issue.line else "file"
+        text = f"{where}: {issue.message}"
+        if issue.expected is not None and issue.actual is not None:
+            text += f" (expected 0x{issue.expected:02X}, found 0x{issue.actual:02X})"
+        out.kv("Issue", text, status="error")
+    if len(issues) > MATCH_DISPLAY_LIMIT:
+        out.note(f"{len(issues) - MATCH_DISPLAY_LIMIT} more issues not shown (use --json).")
+    return EXIT_NO_MATCH
+
+
+def handle_codegen(args: argparse.Namespace, out: Output) -> int:
+    algorithm, _ = take_algorithm(args, args.items, (), command="codegen")
+    if not isinstance(algorithm, CrcAlgorithm):
+        raise CodegenError(f"Code generation supports CRC algorithms; {algorithm.name} is a checksum.")
+    code = generate(algorithm, args.lang, args.name)
+    if args.output:
+        Path(args.output).write_text(code, encoding="utf-8")
+    if out.json:
+        out.emit_json({"algorithm": algorithm.name, "language": args.lang, "code": code, "written_to": args.output})
+        return EXIT_OK
+    if args.output:
+        if out.human:
+            out.success(f"Wrote {args.lang} code for {algorithm.name} to {args.output}")
+        return EXIT_OK
+    out.stdout.write(code)
+    return EXIT_OK
+
+
+def handle_transform(args: argparse.Namespace, out: Output) -> int:
+    data = load_data(args)
     transformed = transform_byte_order(data, args.byte_order)
+    if out.json:
+        out.emit_json({"byte_order": args.byte_order, "input_length": len(data), "result": transformed.hex().upper()})
+        return EXIT_OK
+    if out.quiet:
+        out.value(format_bytes(transformed, args.output_format))
+        return EXIT_OK
+    out.section("Byte Transform")
+    out.kv("Original data", io_helpers.detect_original_data_kind(args))
+    out.kv("Input length", f"{len(data)} bytes")
+    out.kv("Byte order", f"{args.byte_order} ({describe_byte_order(args.byte_order)})")
+    out.kv("Result", format_bytes(transformed, args.output_format), status="success")
+    emit_input_note(out, args)
+    return EXIT_OK
 
-    maybe_print_banner(args)
-    print_section("Byte Transform")
-    print_kv("Original data", detect_original_data_kind(args))
-    print_kv("Input length", f"{len(data)} bytes")
-    print_kv("Byte order", f"{args.byte_order} ({describe_byte_order(args.byte_order)})")
-    print_kv("Result", format_bytes(transformed, args.output_format), status="success")
-    return 0
 
-
-def handle_self_test(args: argparse.Namespace) -> int:
+def handle_self_test(args: argparse.Namespace, out: Output) -> int:
     failures = validate_catalog()
+    crc_count = sum(1 for algorithm in FULL_CATALOG if algorithm.family == "crc")
+    if out.json:
+        out.emit_json({"passed": not failures, "algorithms": len(FULL_CATALOG), "failures": failures})
+        return EXIT_NO_MATCH if failures else EXIT_OK
     if failures:
         for failure in failures:
-            print_error(failure)
-        return 1
-
-    maybe_print_banner(args)
-    print_section("Self Test")
-    print_kv("Status", "CRC and checksum catalog validation passed.", status="success")
-    return 0
-
-
-def handle_banner(_: argparse.Namespace) -> int:
-    print(render_banner())
-    print(render_credit_lines())
-    return 0
-
-
-def add_input_mode_flags(parser: argparse.ArgumentParser) -> None:
-    parser.add_argument(
-        "--as-text",
-        action="store_true",
-        help=argparse.SUPPRESS,
+            out.error(failure)
+        return EXIT_NO_MATCH
+    if out.quiet:
+        out.value("passed")
+        return EXIT_OK
+    out.section("Self Test")
+    out.kv(
+        "Status",
+        f"CRC and checksum catalog validation passed: {len(FULL_CATALOG)} algorithms "
+        f"({crc_count} CRCs with check and residue, {len(FULL_CATALOG) - crc_count} checksums) "
+        f"against {CHECK_INPUT.decode()}.",
+        status="success",
     )
-    parser.add_argument(
-        "--as-file",
-        action="store_true",
-        help="Treat INPUT as a file path and read raw bytes from it.",
+    return EXIT_OK
+
+
+def handle_banner(args: argparse.Namespace, out: Output) -> int:
+    out.line(render_banner(out.color))
+    out.line(render_credit_lines(out.color))
+    return EXIT_OK
+
+
+# --- Parser --------------------------------------------------------------------------------
+
+
+class HelpFormatter(argparse.RawDescriptionHelpFormatter):
+    def __init__(self, prog: str) -> None:
+        super().__init__(prog, max_help_position=32)
+
+
+def add_common_options(parser: argparse.ArgumentParser, suppress: bool) -> None:
+    # Sub-commands use SUPPRESS so a flag given before the command is not reset by the sub-parser.
+    default: object = argparse.SUPPRESS if suppress else False
+    group = parser.add_argument_group("output options")
+    group.add_argument("--json", action="store_true", default=default, help="Print machine-readable JSON.")
+    group.add_argument("-q", "--quiet", action="store_true", default=default, help="Print only the result value.")
+    group.add_argument(
+        "--no-color", action="store_true", default=default, help="Disable colored output (NO_COLOR is also honored)."
+    )
+    group.add_argument(
+        "--show-banner", action="store_true", default=default, help="Print the banner before the output."
     )
 
 
-def add_input_source_arguments(parser: argparse.ArgumentParser) -> None:
+def add_input_options(parser: argparse.ArgumentParser) -> None:
+    group = parser.add_argument_group("input options")
+    group.add_argument(
+        "--as-file", action="store_true", help="Read the original data from this file path ('-' for stdin)."
+    )
+    group.add_argument(
+        "--as-text", action="store_true", help="Treat the original data as plain text, even if it starts with 0x or 0b."
+    )
+    group.add_argument("--offset", type=int, default=0, help="Skip this many bytes at the start of the data.")
+    group.add_argument("--length", type=int, help="Use only this many bytes (after --offset).")
+    group.add_argument(
+        "--exclude-tail",
+        type=int,
+        default=0,
+        metavar="N",
+        help="Ignore the last N bytes (for example a stored checksum).",
+    )
+
+
+def add_original_data(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "original_data",
         metavar="original-data",
-        help=(
-            "Original data (the raw text or raw bytes whose CRC you want to test). "
-            "Values starting with 0x are treated as hex bytes, values starting with 0b are treated as binary bytes, "
-            "and all others are treated as text unless --as-file is used."
-        ),
+        help="Data to process: 0x.. hex bytes, 0b.. binary bytes, '-' for stdin, otherwise text.",
     )
-    add_input_mode_flags(parser)
+    add_input_options(parser)
 
 
-def add_byte_order_arguments(parser: argparse.ArgumentParser, allow_scan: bool = False) -> None:
+def add_byte_order(parser: argparse.ArgumentParser, allow_scan: bool = False) -> None:
     parser.add_argument(
         "--byte-order",
         default="native",
         choices=BYTE_ORDER_MODES,
-        help=(
-            "Transform bytes before processing. "
-            "native=as-is, reverse=reverse stream, "
-            "swap16/swap32/swap64=swap bytes inside each word."
-        ),
+        help="Transform the data bytes first: native, reverse, swap16, swap32 or swap64.",
     )
     if allow_scan:
-        parser.add_argument(
-            "--scan-byte-order",
-            action="store_true",
-            help="Try the selected byte order first, then all other byte-order modes.",
-        )
+        parser.add_argument("--scan-byte-order", action="store_true", help="Also try every other byte-order mode.")
+
+
+def add_crc_params(parser: argparse.ArgumentParser, spec: bool) -> None:
+    group = parser.add_argument_group("custom CRC parameters" + (" (VALUE, A,B,C or START:END[:STEP])" if spec else ""))
+    group.add_argument("--width", type=int, help="CRC width in bits.")
+    group.add_argument("--poly", help="Polynomial" + (" spec." if spec else " (without the top bit)."))
+    group.add_argument(
+        "--init", help="Initial register value (RevEng notation). Default: 0." if not spec else "init spec."
+    )
+    group.add_argument("--xor-out", dest="xor_out", help="Final XOR value. Default: 0." if not spec else "xorout spec.")
+    group.add_argument(
+        "--refin", help="Reflect input bytes: true or false." + (" Default: auto." if spec else " Default: false.")
+    )
+    group.add_argument(
+        "--refout", help="Reflect the output: true or false." + (" Default: auto." if spec else " Default: false.")
+    )
+
+
+def add_sum_params(parser: argparse.ArgumentParser) -> None:
+    group = parser.add_argument_group("custom sum checksum (with --sum; uses --width, default 8)")
+    group.add_argument("--sum", action="store_true", help="Use a custom sum checksum instead of a CRC.")
+    group.add_argument(
+        "--word-size", type=int, metavar="BITS", help="Bits per summed word: 8, 16, 32 or 64. Default: 8."
+    )
+    group.add_argument("--endian", choices=ENDIAN_MODES, help="Byte order of multi-byte words. Default: big.")
+    group.add_argument("--carry", choices=CARRY_MODES, help="Carry handling. Default: discard.")
+    group.add_argument("--complement", choices=COMPLEMENT_MODES, help="Final complement. Default: none.")
+
+
+def add_frame_options(parser: argparse.ArgumentParser, auto: bool) -> None:
+    group = parser.add_argument_group("frame layout")
+    group.add_argument(
+        "--crc-at",
+        choices=(*POSITIONS, "auto") if auto else POSITIONS,
+        default="end",
+        help="Where the checksum sits in the frame." + (" 'auto' tries both." if auto else ""),
+    )
+    group.add_argument(
+        "--crc-endian",
+        choices=("big", "little", "auto"),
+        default="auto",
+        help="Byte order of the stored checksum. Default: auto (try both).",
+    )
+    if auto:
+        group.add_argument("--skip", default="0", help="Header bytes excluded from the data, or 'auto' (0-8).")
+    else:
+        group.add_argument("--skip", type=int, default=0, help="Header bytes excluded from the data.")
+
+
+DESCRIPTION = f"""{{banner}}
+
+{TOOL_NAME} calculates, identifies, reverse-engineers and forges CRCs and checksums.
+
+Input rules:
+  - data starting with 0x is hex bytes, 0b is binary bytes, '-' reads stdin, anything else is text
+  - checksums are decimal by default; use 0x for hex or 0b for binary
+  - --as-file reads a file, --as-text forces text
+"""
+
+EPILOG = """Common tasks:
+  crcforge calc crc-16-modbus 123456789            calculate a known CRC
+  crcforge calc 123456789 --all --width 16         every 16-bit algorithm at once
+  crcforge find 0x4B37 123456789                   which catalog algorithm made this checksum?
+  crcforge solve 0x0102:0x4110 0x0304:0x7181 ...   derive CRC parameters from several samples
+  crcforge solve --frames 010300000001840A ...     same, with the checksum inside each frame
+  crcforge brute 0x4B37 123456789 --width 16 --poly 0x8005 --init 0:0xFFFF
+  crcforge verify crc-16-modbus 0x010300000001840A --frame
+  crcforge forge crc-32 "hello world" 0xDEADBEEF   append 4 bytes so the CRC becomes 0xDEADBEEF
+  crcforge records firmware.hex                    check every Intel HEX / S-record checksum
+  crcforge codegen crc-16-modbus --lang c          generate a C implementation
+  crcforge info crc-32                             parameters, check value and reference
+
+Exit codes: 0 success, 1 no match / invalid, 2 usage or input error, 130 interrupted.
+Run 'crcforge <command> --help' for details on a command."""
 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="crcforge",
         formatter_class=HelpFormatter,
-        description=(
-            f"{render_banner()}\n"
-            f"{render_credit_lines()}\n\n"
-            f"{TOOL_NAME} calculates CRCs and complement checksums, matches known algorithms, "
-            "and handles endian transforms.\n\n"
-            "Input auto-detection:\n"
-            "- values starting with 0x are parsed as the original data bytes in hex\n"
-            "- values starting with 0b are parsed as the original data bytes in binary\n"
-            "- all other values are parsed as the original plain-text data\n"
-            "- checksum arguments use decimal by default; use 0x for hexadecimal or 0b for binary\n"
-            "- the CRC value may also match after its own byte order is swapped\n"
-            "- use --as-file for file paths\n"
-            "Running just 'python crcforge.py' prints this help screen."
-        ),
-        epilog=(
-            "Examples:\n"
-            "  python crcforge.py list --width 16\n"
-            "  python crcforge.py calc crc-16-modbus 0x313233343536373839\n"
-            "  python crcforge.py calc crc-16-modbus 0b0011000100110010\n"
-            "  python crcforge.py calc 123456789 --algorithm crc-16-modbus\n"
-            "  python crcforge.py calc 123456789 --width 16 --poly 0x1021 --init 0xFFFF --refin false --refout false\n"
-            "  python crcforge.py calc crc-16-modbus 123456789\n"
-            "  python crcforge.py calc internet-checksum 0x450000730000400040110000C0A80001C0A800C7\n"
-            "  python crcforge.py calc twos-complement-8 0x0300300002337A\n"
-            "  python crcforge.py find 0x4B37 0x313233343536373839 --width 16\n"
-            "  python crcforge.py find 0b0100101100110111 123456789 --width 16\n"
-            "  python crcforge.py brute 0x4B37 asadfdsaaa\n"
-            "  python crcforge.py brute 0x4B37 123456789 --full-custom --max-combinations 100000\n"
-            "  python crcforge.py brute 0x29B1 123456789 --width 16 --poly 0x1021 --init 0xFFFF --refin false --refout false\n"
-            "  python crcforge.py transform 0xA9BB7BFD --byte-order swap32\n"
-            "  python crcforge.py banner"
-        ),
+        description=DESCRIPTION.format(banner=f"{render_banner()}\n{render_credit_lines()}"),
+        epilog=EPILOG,
     )
-    parser.add_argument(
-        "--show-banner",
-        action="store_true",
-        help="Print the banner and credits before command output.",
-    )
-
-    subparsers = parser.add_subparsers(dest="command")
+    parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
+    add_common_options(parser, suppress=False)
+    subparsers = parser.add_subparsers(dest="command", metavar="<command>", title="commands")
     subparsers.required = True
+    common = argparse.ArgumentParser(add_help=False)
+    add_common_options(common, suppress=True)
 
-    list_parser = subparsers.add_parser(
-        "list",
-        help="List built-in CRC and checksum algorithms.",
-        description="List the built-in CRC and complement checksum catalog with all parameters.",
-    )
-    list_parser.add_argument("--width", type=int, help="Filter by CRC/checksum width in bits.")
-    list_parser.add_argument(
-        "--aliases",
-        action="store_true",
-        help="Also print alias names for each built-in algorithm.",
-    )
-    list_parser.set_defaults(handler=handle_list)
+    def command(
+        name: str, help_text: str, description: str, handler: Callable[..., int], epilog: str = ""
+    ) -> argparse.ArgumentParser:
+        sub = subparsers.add_parser(
+            name,
+            help=help_text,
+            description=description,
+            epilog=epilog or None,
+            formatter_class=HelpFormatter,
+            parents=[common],
+        )
+        sub.set_defaults(handler=handler)
+        return sub
 
-    calc_parser = subparsers.add_parser(
+    calc = command(
         "calc",
-        help="Calculate a CRC or checksum using a built-in algorithm or custom CRC parameters.",
-        description=(
-            "Calculate the CRC or complement checksum of the given original data. "
-            "Use either a built-in algorithm name or provide custom CRC parameters."
-        ),
+        "Calculate a CRC or checksum.",
+        "Calculate a built-in algorithm, custom CRC parameters, a custom sum checksum, or every catalog entry.",
+        handle_calc,
+        "Examples:\n  crcforge calc crc-16-modbus 123456789\n  crcforge calc 123456789 --algorithm crc-32\n"
+        "  crcforge calc 0x313233 --width 16 --poly 0x1021 --init 0xFFFF\n"
+        "  crcforge calc 123456789 --sum --width 16 --word-size 16 --complement ones\n"
+        "  crcforge calc firmware.bin --as-file --all --family crc",
     )
-    calc_parser.add_argument(
+    calc.add_argument(
         "calc_items",
         nargs="+",
         metavar="value",
-        help=(
-            "Legacy built-in form: <algorithm> <original-data>. "
-            "Alternative form: <original-data> with --algorithm <name> or custom parameters."
-        ),
+        help="<algorithm> <original-data>, or <original-data> with --algorithm/--all/custom parameters.",
     )
-    calc_parser.add_argument(
-        "--algorithm",
-        help="Built-in algorithm name or alias.",
+    calc.add_argument("--algorithm", help="Built-in algorithm name or alias.")
+    calc.add_argument(
+        "--all", action="store_true", help="Calculate every catalog algorithm (filter with --width/--family)."
     )
-    calc_parser.add_argument(
-        "--width",
-        type=int,
-        help="Custom mode: CRC width in bits.",
+    calc.add_argument("--family", choices=FAMILIES, help="With --all: only CRCs or only checksums.")
+    calc.add_argument(
+        "--output-format", choices=("hex", "dec", "bin", "both"), default="both", help="Result format. Default: both."
     )
-    calc_parser.add_argument(
-        "--poly",
-        help="Custom mode: single polynomial value.",
-    )
-    calc_parser.add_argument(
-        "--init",
-        help="Custom mode: single init value. Default: 0x0.",
-    )
-    calc_parser.add_argument(
-        "--xor-out",
-        dest="xor_out",
-        help="Custom mode: single xor-out value. Default: 0x0.",
-    )
-    calc_parser.add_argument(
-        "--refin",
-        help="Custom mode: true or false. Default: false.",
-    )
-    calc_parser.add_argument(
-        "--refout",
-        help="Custom mode: true or false. Default: false.",
-    )
-    add_input_mode_flags(calc_parser)
-    add_byte_order_arguments(calc_parser)
-    calc_parser.add_argument(
-        "--output-format",
-        choices=("hex", "dec", "both"),
-        default="both",
-        help="Output as hexadecimal, decimal, or both.",
-    )
-    calc_parser.set_defaults(handler=handle_calc)
+    add_crc_params(calc, spec=False)
+    add_sum_params(calc)
+    add_input_options(calc)
+    add_byte_order(calc)
 
-    find_parser = subparsers.add_parser(
+    find = command(
         "find",
-        help="Find matching built-in CRC and checksum algorithms.",
-        description=(
-            "Find matching known CRC and complement checksum algorithms. "
-            "This checks one byte-order mode by default, or all modes with --scan-byte-order."
-        ),
+        "Find which built-in algorithm produced a checksum.",
+        "Match one data/checksum pair against the catalog. Checksums that match after a byte swap are reported too.",
+        handle_find,
+        "Examples:\n  crcforge find 0x4B37 123456789\n  crcforge find 19255 123456789 --width 16\n"
+        "  crcforge find 0x1A47 0xA1B2C3D4 --scan-byte-order",
     )
-    find_parser.add_argument(
-        "checksum",
-        metavar="checksum",
-        help="Target checksum value to match. Use decimal digits, 0x-prefixed hex, or 0b-prefixed binary.",
-    )
-    add_input_source_arguments(find_parser)
-    find_parser.add_argument(
-        "--width",
-        type=int,
-        help="Limit the search to a specific CRC width in bits.",
-    )
-    find_parser.add_argument(
-        "--algorithm",
-        action="append",
-        help="Optional algorithm filter. Repeat to narrow the search.",
-    )
-    add_byte_order_arguments(find_parser, allow_scan=True)
-    find_parser.set_defaults(handler=handle_find)
+    find.add_argument("checksum", help="Expected checksum: decimal, 0x hex or 0b binary.")
+    add_original_data(find)
+    find.add_argument("--width", type=int, help="Only algorithms of this width.")
+    find.add_argument("--family", choices=FAMILIES, help="Only CRCs or only checksums.")
+    find.add_argument("--algorithm", action="append", help="Only this algorithm (repeatable).")
+    add_byte_order(find, allow_scan=True)
 
-    brute_parser = subparsers.add_parser(
+    brute = command(
         "brute",
-        help="Scan built-in algorithms or custom CRC parameters across byte-order modes.",
-        description=(
-            "Brute mode scans the full built-in catalog against all supported byte-order "
-            "transforms, or switches into custom parameter brute mode when --poly or --full-custom is provided."
-        ),
+        "Scan the catalog across byte orders, or search custom CRC parameters.",
+        "Without custom flags, scan every catalog algorithm against every byte-order transform. With --poly or "
+        "--full-custom, search custom CRC parameters; xorout (or init) is solved directly rather than scanned.",
+        handle_brute,
+        "Examples:\n  crcforge brute 0x4B37 123456789\n"
+        "  crcforge brute 0x4B37 123456789 --width 16 --poly 0x8005 --init 0:0xFFFF\n"
+        "  crcforge brute 0x31C3 123456789 --full-custom --refin false --refout false\n\n"
+        "With one sample, wide searches match by coincidence; 'crcforge solve' with more samples is exact.",
     )
-    brute_parser.add_argument(
-        "checksum",
-        metavar="checksum",
-        help="Target checksum value to match. Use decimal digits, 0x-prefixed hex, or 0b-prefixed binary.",
-    )
-    add_input_source_arguments(brute_parser)
-    brute_parser.add_argument(
-        "--width",
-        type=int,
-        help="Optional width filter to reduce the brute scan.",
-    )
-    brute_parser.add_argument(
-        "--algorithm",
-        action="append",
-        help="Optional algorithm filter. Repeat to limit the scan.",
-    )
-    brute_parser.add_argument(
-        "--poly",
-        help=(
-            "Custom brute mode: poly spec. Supports VALUE, comma lists, or inclusive ranges "
-            "like 0x1021,0x8005 or 0x1000:0x10FF[:STEP]."
-        ),
-    )
-    brute_parser.add_argument(
+    brute.add_argument("checksum", help="Expected checksum: decimal, 0x hex or 0b binary.")
+    add_original_data(brute)
+    brute.add_argument("--algorithm", action="append", help="Catalog mode: only this algorithm (repeatable).")
+    brute.add_argument("--family", choices=FAMILIES, help="Catalog mode: only CRCs or only checksums.")
+    add_crc_params(brute, spec=True)
+    brute.add_argument(
         "--full-custom",
         action="store_true",
-        help=(
-            "Custom brute mode: expand omitted poly/init/xor-out specs to the full value range. "
-            "If --width is omitted, it is inferred from the checksum."
-        ),
+        help="Custom mode: search every poly (and free init/xorout); width defaults to the checksum's digits.",
     )
-    brute_parser.add_argument(
-        "--init",
-        help="Custom brute mode: init spec. Default: 0x0.",
+    brute.add_argument(
+        "--max-combinations", type=int, default=50_000_000, help="Safety limit on evaluations. Default: 50,000,000."
     )
-    brute_parser.add_argument(
-        "--xor-out",
-        dest="xor_out",
-        help="Custom brute mode: xor-out spec. Default: 0x0.",
-    )
-    brute_parser.add_argument(
-        "--refin",
-        help="Custom brute mode: RefIn mode: auto, true, or false. Default: auto.",
-    )
-    brute_parser.add_argument(
-        "--refout",
-        help="Custom brute mode: RefOut mode: auto, true, or false. Default: auto.",
-    )
-    brute_parser.add_argument(
-        "--max-combinations",
-        type=int,
-        default=2000000,
-        help="Custom brute mode: safety limit for total combinations. Default: 2000000.",
-    )
-    brute_parser.add_argument(
-        "--limit",
-        type=int,
-        default=100,
-        help="Custom brute mode: maximum number of matches to print. Default: 100.",
-    )
-    brute_parser.add_argument(
+    brute.add_argument("--limit", type=int, default=100, help="Maximum matches to show. Default: 100.")
+    brute.add_argument("--jobs", type=int, default=0, help="Worker processes; 0 = automatic. Default: 0.")
+    brute.add_argument(
         "--progress-interval",
         type=float,
         default=2.0,
-        help=(
-            "Custom brute mode: live progress update interval in seconds. "
-            "Use 0 to disable progress output. Default: 2.0."
-        ),
+        help="Seconds between progress lines when not on a terminal; 0 disables progress.",
     )
-    brute_parser.set_defaults(handler=handle_brute)
 
-    transform_parser = subparsers.add_parser(
-        "transform",
-        help="Apply endian/byte-order transforms without CRC.",
-        description=(
-            "Transform input bytes and print the result. "
-            "Inputs starting with 0x are hex, inputs starting with 0b are binary, "
-            "and other values are text unless --as-file is used."
-        ),
+    solve_parser = command(
+        "solve",
+        "Derive CRC parameters from several samples.",
+        "Identify the CRC or checksum behind several data/checksum samples. Two or more samples of the same length "
+        "let CRCForge derive the polynomial directly (any width); samples of different lengths pin down init and "
+        "xorout. Catalog algorithms and sum/XOR layouts are checked too.",
+        handle_solve,
+        "Examples:\n  crcforge solve 0x313233343536373839:0x4B37 0x3132:0x... 0x41424344:0x...\n"
+        "  crcforge solve --samples-file samples.txt --width 32\n"
+        "  crcforge solve --frames 0103000000018408 0103000000024409 --crc-endian auto\n"
+        "  crcforge solve --frames @frame1.bin @frame2.bin --crc-at auto --skip auto\n\n"
+        "Sample syntax: DATA:CHECKSUM, where DATA follows the usual input rules or is @file.\n"
+        "Samples files hold one sample (or frame) per line; # starts a comment.",
     )
-    add_input_source_arguments(transform_parser)
-    add_byte_order_arguments(transform_parser)
-    transform_parser.add_argument(
+    solve_parser.add_argument(
+        "samples", nargs="*", metavar="sample", help="DATA:CHECKSUM pairs, or whole frames with --frames."
+    )
+    solve_parser.add_argument(
+        "--samples-file", metavar="FILE", help="Read samples (or frames) from a file, one per line ('-' for stdin)."
+    )
+    solve_parser.add_argument(
+        "--frames", action="store_true", help="Each sample is a whole frame with the checksum inside it."
+    )
+    add_frame_options(solve_parser, auto=True)
+    add_crc_params(solve_parser, spec=True)
+    solve_parser.add_argument(
+        "--scan-byte-order", action="store_true", help="Also try byte-order transforms of the data."
+    )
+    solve_parser.add_argument("--limit", type=int, default=64, help="Maximum CRC solutions to compute. Default: 64.")
+    solve_parser.add_argument(
+        "--all-solutions", action="store_true", help="List every fitting parameter set, not just the likely answer."
+    )
+    solve_parser.add_argument(
+        "--progress-interval",
+        type=float,
+        default=2.0,
+        help="Seconds between progress lines when not on a terminal; 0 disables progress.",
+    )
+
+    verify = command(
+        "verify",
+        "Check that data and a checksum belong together.",
+        "Verify a checksum. With --frame, the checksum is read from the end (or start) of the data itself.",
+        handle_verify,
+        "Examples:\n  crcforge verify crc-16-modbus 123456789 0x4B37\n"
+        "  crcforge verify crc-16-modbus 0x01030000000184 0A --frame\n"
+        "  crcforge verify crc-32 firmware.bin 0xCBF43926 --as-file",
+    )
+    verify.add_argument(
+        "items", nargs="+", metavar="value", help="<algorithm> <original-data> <checksum> (no checksum with --frame)."
+    )
+    verify.add_argument("--algorithm", help="Built-in algorithm name or alias.")
+    verify.add_argument("--frame", action="store_true", help="The checksum is stored inside the data.")
+    add_frame_options(verify, auto=False)
+    add_crc_params(verify, spec=False)
+    add_sum_params(verify)
+    add_input_options(verify)
+    add_byte_order(verify)
+
+    forge_parser = command(
+        "forge",
+        "Patch data so it produces a chosen checksum.",
+        "Insert (default: append) or overwrite a few bytes so the data's CRC or sum/XOR checksum becomes the target.",
+        handle_forge,
+        'Examples:\n  crcforge forge crc-32 "hello world" 0xDEADBEEF\n'
+        "  crcforge forge crc-16-modbus firmware.bin 0x0000 --as-file --at 0x100 --overwrite -o patched.bin\n"
+        "  crcforge forge sum-8 0x0102030405 0x00",
+    )
+    forge_parser.add_argument("items", nargs="+", metavar="value", help="<algorithm> <original-data> <target>.")
+    forge_parser.add_argument("--algorithm", help="Built-in algorithm name or alias.")
+    forge_parser.add_argument(
+        "--at", help="Patch position: byte offset, negative from the end, 'start' or 'end'. Default: end."
+    )
+    forge_parser.add_argument("--overwrite", action="store_true", help="Overwrite bytes at --at instead of inserting.")
+    forge_parser.add_argument(
+        "--patch-size", type=int, metavar="BYTES", help="Patch length. Default: the checksum width."
+    )
+    forge_parser.add_argument("-o", "--output", metavar="FILE", help="Write the forged bytes to FILE.")
+    forge_parser.add_argument(
+        "--output-format", choices=("hex", "compact-hex", "text"), help="How to print the forged data."
+    )
+    add_crc_params(forge_parser, spec=False)
+    add_sum_params(forge_parser)
+    add_input_options(forge_parser)
+
+    records = command(
+        "records",
+        "Validate an Intel HEX or Motorola S-record file.",
+        "Check every record checksum, record length and structure in an Intel HEX or S-record file.",
+        handle_records,
+        "Examples:\n  crcforge records firmware.hex\n  crcforge records firmware.s19 --json",
+    )
+    records.add_argument("file", help="Path to the .hex/.s19/.srec file ('-' for stdin).")
+
+    codegen = command(
+        "codegen",
+        "Generate CRC source code (C, Python, Rust).",
+        "Generate a table-driven implementation of a built-in or custom CRC.",
+        handle_codegen,
+        "Examples:\n  crcforge codegen crc-16-modbus --lang c -o crc16_modbus.c\n"
+        "  crcforge codegen --width 16 --poly 0x1021 --init 0xFFFF --lang python",
+    )
+    codegen.add_argument(
+        "items", nargs="*", metavar="algorithm", help="Built-in algorithm name (omit with custom parameters)."
+    )
+    codegen.add_argument("--algorithm", help=argparse.SUPPRESS)
+    codegen.add_argument("--lang", choices=LANGUAGES, default="c", help="Target language. Default: c.")
+    codegen.add_argument("--name", help="Function name. Default: derived from the algorithm name.")
+    codegen.add_argument("-o", "--output", metavar="FILE", help="Write the code to FILE.")
+    add_crc_params(codegen, spec=False)
+
+    transform = command(
+        "transform",
+        "Apply a byte-order transform.",
+        "Transform the data's byte order and print the result, without any checksum work.",
+        handle_transform,
+        "Examples:\n  crcforge transform 0xA9BB7BFD --byte-order swap32\n"
+        "  crcforge transform 0x48656C6C6F --output-format text",
+    )
+    add_original_data(transform)
+    add_byte_order(transform)
+    transform.add_argument(
         "--output-format",
         choices=("hex", "compact-hex", "text"),
         default="hex",
-        help="Render transformed bytes as spaced hex, compact hex, or UTF-8 text.",
+        help="Render as spaced hex, compact hex or UTF-8 text.",
     )
-    transform_parser.set_defaults(handler=handle_transform)
 
-    self_test_parser = subparsers.add_parser(
+    list_parser = command(
+        "list",
+        "List built-in algorithms.",
+        "List the built-in CRC and checksum catalog.",
+        handle_list,
+        "Examples:\n  crcforge list --width 16\n  crcforge list --family checksum\n"
+        "  crcforge list --search modbus --aliases",
+    )
+    list_parser.add_argument("--width", type=int, help="Only this width.")
+    list_parser.add_argument("--family", choices=FAMILIES, help="Only CRCs or only checksums.")
+    list_parser.add_argument("--search", help="Only names or aliases containing this text.")
+    list_parser.add_argument("--aliases", action="store_true", help="Also print alias names.")
+
+    info = command(
+        "info",
+        "Show one algorithm in detail.",
+        "Show parameters, aliases, check value, residue and reference.",
+        handle_info,
+    )
+    info.add_argument("name", help="Algorithm name or alias.")
+
+    command(
         "self-test",
-        help="Validate the built-in CRC and checksum catalog.",
-        description="Run the catalog self-test using the standard payload 123456789.",
+        "Validate the built-in catalog.",
+        "Check every catalog entry against its published check value and residue.",
+        handle_self_test,
     )
-    self_test_parser.set_defaults(handler=handle_self_test)
-
-    banner_parser = subparsers.add_parser(
-        "banner",
-        help="Print the tool banner and credits.",
-        description="Print the banner, author credit, and X/Twitter handle.",
-    )
-    banner_parser.set_defaults(handler=handle_banner)
-
+    command("banner", "Print the banner.", "Print the banner, author credit and X/Twitter handle.", handle_banner)
     return parser
 
 
-def main(argv: Optional[Sequence[str]] = None) -> int:
+def main(argv: Sequence[str] | None = None) -> int:
     parser = build_parser()
-    if argv is None:
-        argv = sys.argv[1:]
-
-    if not argv:
+    arguments = list(sys.argv[1:] if argv is None else argv)
+    if all(argument in GLOBAL_FLAGS for argument in arguments):
         parser.print_help()
-        return 0
-
-    args = parser.parse_args(argv)
+        return EXIT_OK
+    args = parser.parse_args(arguments)
+    out = Output(json_mode=args.json, quiet=args.quiet, color=False if args.no_color else None)
     try:
-        return args.handler(args)
-    except FileNotFoundError as error:
-        print_error(f"File not found: {error}")
-        return 1
-    except KeyError as error:
-        print_error(str(error))
-        return 1
-    except ValueError as error:
-        print_error(str(error))
-        return 1
+        if args.show_banner and out.human:
+            out.line(render_banner(out.color))
+            out.line(render_credit_lines(out.color))
+        return int(args.handler(args, out))
+    except UnknownAlgorithmError as error:
+        hint = f"Did you mean: {', '.join(error.suggestions)}?" if error.suggestions else None
+        out.error(f"Unknown algorithm: {error.name}", hint or "Run 'crcforge list' to browse the catalog.")
+        return EXIT_USAGE
+    except InputError as error:
+        out.error(str(error), error.hint)
+        return EXIT_USAGE
+    except (ForgeError, CodegenError, ValueError) as error:
+        out.error(str(error))
+        return EXIT_USAGE
+    except KeyboardInterrupt:
+        out.error("Interrupted.")
+        return EXIT_INTERRUPTED
+    except BrokenPipeError:
+        return EXIT_OK
 
 
 if __name__ == "__main__":
