@@ -1,9 +1,9 @@
-﻿![CRCForge logo](docs/assets/crcforge_logo.png)
+![CRCForge logo](https://raw.githubusercontent.com/kayranfatih/crcforge/main/docs/assets/crcforge_logo.png)
 
 [![CI](https://github.com/kayranfatih/crcforge/actions/workflows/ci.yml/badge.svg)](https://github.com/kayranfatih/crcforge/actions/workflows/ci.yml)
 ![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue)
 ![Dependencies: none](https://img.shields.io/badge/dependencies-none-brightgreen)
-[![License: Apache 2.0](https://img.shields.io/badge/license-Apache%202.0-blue)](LICENSE)
+[![License: Apache 2.0](https://img.shields.io/badge/license-Apache%202.0-blue)](https://github.com/kayranfatih/crcforge/blob/main/LICENSE)
 
 **CRCForge** is a Swiss Army knife for CRCs and checksums, built for reverse engineers, protocol analysts and firmware researchers. Give it data and a checksum and it tells you which algorithm produced it. When no known algorithm fits, it **derives the CRC parameters from your samples**. It also forges data to hit a chosen CRC, validates Intel HEX and S-record files, and generates C, Python or Rust implementations.
 
@@ -180,7 +180,7 @@ Every command accepts `--json` (structured output) and `-q/--quiet` (just the re
 
 ## Documentation
 
-The full guide lives in [`docs/`](docs/index.md) and on the [documentation site](https://kayranfatih.github.io/crcforge/): concepts, a reverse-engineering walkthrough, forging, every command, the Python API and the [algorithm list](docs/algorithms.md). See [CHANGELOG.md](CHANGELOG.md) for what changed in each release.
+The full guide lives in [`docs/`](https://github.com/kayranfatih/crcforge/tree/main/docs) and on the [documentation site](https://kayranfatih.github.io/crcforge/): concepts, a reverse-engineering walkthrough, forging, every command, the Python API and the [algorithm list](https://github.com/kayranfatih/crcforge/blob/main/docs/algorithms.md). See [CHANGELOG.md](https://github.com/kayranfatih/crcforge/blob/main/CHANGELOG.md) for what changed in each release.
 
 ## Development
 
@@ -190,7 +190,7 @@ python -m pytest                 # tests (python -m unittest discover -s tests a
 ruff check . && ruff format --check . && mypy
 ```
 
-[CONTRIBUTING.md](CONTRIBUTING.md) covers the catalog sync script, the docs and the release process.
+[CONTRIBUTING.md](https://github.com/kayranfatih/crcforge/blob/main/CONTRIBUTING.md) covers the catalog sync script, the docs and the release process.
 
 ## Credits
 
