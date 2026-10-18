@@ -273,7 +273,7 @@ def parse_sample(raw_value: str) -> tuple[bytes, ParsedChecksum]:
     if ":" not in raw_value:
         raise InputError(
             f"Sample '{raw_value}' has no checksum.",
-            hint="Write samples as DATA:CHECKSUM, for example 0x313233:0x5BCE or hello:0x1234.",
+            hint="Write samples as DATA:CHECKSUM, for example 0x313233:0x7A75 or hello:0x34F6.",
         )
     data_text, checksum_text = raw_value.rsplit(":", 1)
     data = read_file_bytes(data_text[1:]) if data_text.startswith("@") else parse_data_literal(data_text)

@@ -65,6 +65,16 @@ EXIT_INTERRUPTED = 130
 
 MATCH_DISPLAY_LIMIT = 50
 DERIVED_DISPLAY_LIMIT = 8
+PARAM_LABELS = {
+    "width": "Width",
+    "poly": "Poly",
+    "init": "Init",
+    "refin": "RefIn",
+    "refout": "RefOut",
+    "xorout": "XorOut",
+    "type": "Type",
+    "word_bits": "Word bits",
+}
 GLOBAL_FLAGS = frozenset({"--json", "-q", "--quiet", "--no-color", "--show-banner"})
 
 
@@ -361,7 +371,8 @@ def handle_info(args: argparse.Namespace, out: Output) -> int:
     if algorithm.aliases:
         out.kv("Aliases", ", ".join(algorithm.aliases))
     for key, value in algorithm.params().items():
-        out.kv(key, str(value).lower() if isinstance(value, bool) else value, status="text")
+        label = PARAM_LABELS.get(key, key.replace("_", " ").capitalize())
+        out.kv(label, str(value).lower() if isinstance(value, bool) else value, status="text")
     if algorithm.check is not None:
         out.kv("Check", f"{format_value(algorithm.check, algorithm.width)} for the ASCII string 123456789")
     if isinstance(algorithm, CrcAlgorithm):
@@ -1261,8 +1272,10 @@ def add_input_options(parser: argparse.ArgumentParser) -> None:
     group.add_argument(
         "--as-text", action="store_true", help="Treat the original data as plain text, even if it starts with 0x or 0b."
     )
-    group.add_argument("--offset", type=int, default=0, help="Skip this many bytes at the start of the data.")
-    group.add_argument("--length", type=int, help="Use only this many bytes (after --offset).")
+    group.add_argument(
+        "--offset", type=int, default=0, metavar="N", help="Skip this many bytes at the start of the data."
+    )
+    group.add_argument("--length", type=int, metavar="N", help="Use only this many bytes (after --offset).")
     group.add_argument(
         "--exclude-tail",
         type=int,
@@ -1366,8 +1379,10 @@ EPILOG = """Common tasks:
   crcforge calc crc-16-modbus 123456789            calculate a known CRC
   crcforge calc 123456789 --all --width 16         every 16-bit algorithm at once
   crcforge find 0x4B37 123456789                   which catalog algorithm made this checksum?
-  crcforge solve 0x0102:0x4110 0x0304:0x7181 ...   derive CRC parameters from several samples
-  crcforge solve --frames 010300000001840A ...     same, with the checksum inside each frame
+  crcforge solve PING:0x3197 PONG:0x16A1 PUSH:0x4524 STATUS:0x7CB4
+                                                   derive CRC parameters from several samples
+  crcforge solve --frames 010300000001840A 010300000002C40B 01030000000AC5CD
+                                                   same, with the checksum inside each frame
   crcforge brute 0x4B37 123456789 --width 16 --poly 0x8005 --init 0:0xFFFF
   crcforge verify crc-16-modbus 0x010300000001840A --frame
   crcforge forge crc-32 "hello world" 0xDEADBEEF   append 4 bytes so the CRC becomes 0xDEADBEEF
@@ -1446,7 +1461,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     find.add_argument("checksum", help="Expected checksum: decimal, 0x hex or 0b binary.")
     add_original_data(find)
-    find.add_argument("--width", type=int, help="Only algorithms of this width.")
+    find.add_argument("--width", type=int, metavar="BITS", help="Only algorithms of this width.")
     find.add_argument("--family", choices=FAMILIES, help="Only CRCs or only checksums.")
     find.add_argument("--algorithm", action="append", help="Only this algorithm (repeatable).")
     add_byte_order(find, allow_scan=True)
@@ -1496,9 +1511,10 @@ def build_parser() -> argparse.ArgumentParser:
         "let CRCForge derive the polynomial directly (any width); samples of different lengths pin down init and "
         "xorout. Catalog algorithms and sum/XOR layouts are checked too.",
         handle_solve,
-        "Examples:\n  crcforge solve 0x313233343536373839:0x4B37 0x3132:0x... 0x41424344:0x...\n"
+        "Examples:\n  crcforge solve 0x0102:0xE181 0x0304:0x8300 0x050607:0xA323\n"
+        "  crcforge solve PING:0x3197 PONG:0x16A1 PUSH:0x4524 STATUS:0x7CB4\n"
         "  crcforge solve --samples-file samples.txt --width 32\n"
-        "  crcforge solve --frames 0103000000018408 0103000000024409 --crc-endian auto\n"
+        "  crcforge solve --frames 010300000001840A 010300000002C40B 01030000000AC5CD\n"
         "  crcforge solve --frames @frame1.bin @frame2.bin --crc-at auto --skip auto\n\n"
         "Sample syntax: DATA:CHECKSUM, where DATA follows the usual input rules or is @file.\n"
         "Samples files hold one sample (or frame) per line; # starts a comment.",
@@ -1537,7 +1553,7 @@ def build_parser() -> argparse.ArgumentParser:
         "Verify a checksum. With --frame, the checksum is read from the end (or start) of the data itself.",
         handle_verify,
         "Examples:\n  crcforge verify crc-16-modbus 123456789 0x4B37\n"
-        "  crcforge verify crc-16-modbus 0x01030000000184 0A --frame\n"
+        "  crcforge verify crc-16-modbus 0x010300000001840A --frame\n"
         "  crcforge verify crc-32 firmware.bin 0xCBF43926 --as-file",
     )
     verify.add_argument(
@@ -1628,7 +1644,7 @@ def build_parser() -> argparse.ArgumentParser:
         "Examples:\n  crcforge list --width 16\n  crcforge list --family checksum\n"
         "  crcforge list --search modbus --aliases",
     )
-    list_parser.add_argument("--width", type=int, help="Only this width.")
+    list_parser.add_argument("--width", type=int, metavar="BITS", help="Only this width.")
     list_parser.add_argument("--family", choices=FAMILIES, help="Only CRCs or only checksums.")
     list_parser.add_argument("--search", help="Only names or aliases containing this text.")
     list_parser.add_argument("--aliases", action="store_true", help="Also print alias names.")

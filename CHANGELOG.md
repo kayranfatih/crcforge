@@ -42,7 +42,7 @@ All notable changes to CRCForge are documented here. The format follows
 - Width inference from decimal checksums: `19255` (`0x4B37`) is now 16 bits, not 15.
 - Plain text that starts with `0x` (for example `0xygen`) now gives a hint to use `--as-text`, which is no longer hidden from `--help`.
 - A plain-text payload that names an existing file now prints a note suggesting `--as-file`.
-- `python crcforge.py` and `python -m crcforge` in a source checkout no longer crash when CRCForge is also installed (for example with `pip install -e .`). The `crcforge.py` script used to shadow the package.
+- `python crcforge.py` and `python -m crcforge` in a source checkout no longer crash when CRCForge is also installed (for example with `pip install -e .`), and `import crcforge` in the checkout root now gives the package. The `crcforge.py` script used to shadow the package.
 
 ### Removed
 

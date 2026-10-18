@@ -25,5 +25,12 @@ def main() -> int:
     return package_main()
 
 
-if __name__ == "__main__":
+if __name__ == "crcforge":
+    # Imported (not run) from the checkout root, e.g. `import crcforge` or pytest with the root on
+    # sys.path: hand over to the real package so this shim never hides it.
+    import importlib
+
+    _bootstrap()
+    sys.modules[__name__] = importlib.import_module("crcforge")
+elif __name__ == "__main__":
     raise SystemExit(main())

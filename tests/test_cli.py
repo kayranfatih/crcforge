@@ -1,11 +1,15 @@
 from __future__ import annotations
 
+import os
+import re
+import shlex
 import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
 
 from _support import run_cli
+from crcforge.cli import build_parser
 from crcforge.solver import ScanResult
 
 MODBUS_FRAMES = ["010300000001840A", "010300000002C40B", "01030000000AC5CD", "0106000100FF984A"]
@@ -29,6 +33,38 @@ class GeneralTest(unittest.TestCase):
                 result = run_cli(command, "--help")
                 self.assertEqual(result.code, 0)
                 self.assertIn("Examples:", result.stdout)
+
+    def test_every_help_example_runs(self) -> None:
+        """Examples shown in --help must keep working (files they mention are skipped)."""
+        parser = build_parser()
+        texts = [parser.epilog or ""]
+        for action in parser._subparsers._group_actions:  # type: ignore[union-attr]
+            texts.extend(sub.epilog or "" for sub in action.choices.values())  # type: ignore[union-attr]
+        commands = []
+        for text in texts:
+            for line in text.splitlines():
+                stripped = line.strip()
+                if not stripped.startswith("crcforge "):
+                    continue
+                command = re.split(r"\s{2,}", stripped)[0]
+                if re.search(r"@|\.(bin|hex|s19|txt|c)\b", command):
+                    continue
+                commands.append(command)
+        self.assertGreater(len(commands), 25)
+        original_directory = os.getcwd()
+        with tempfile.TemporaryDirectory() as directory:
+            os.chdir(directory)  # examples that write files must not touch the repository
+            try:
+                for command in commands:
+                    args = shlex.split(command)[1:]
+                    if args[0] == "brute" and ("--poly" in args or "--full-custom" in args):
+                        args.extend(["--jobs", "1"])
+                    with self.subTest(command):
+                        result = run_cli(*args)
+                        self.assertIn(result.code, (0, 1), result)
+                        self.assertNotIn("Traceback", result.stderr)
+            finally:
+                os.chdir(original_directory)
 
     def test_output_flags_work_before_and_after_the_command(self) -> None:
         after = run_cli("calc", "crc-32", "123456789", "--json").json()
@@ -458,7 +494,7 @@ class CatalogCommandsTest(unittest.TestCase):
 
     def test_info(self) -> None:
         result = run_cli("info", "CRC-16/TMS37157")
-        self.assertIn("init             0x89EC", result.stdout)
+        self.assertIn("Init             0x89EC", result.stdout)
         self.assertIn("attested", result.stdout)
         self.assertIn("reveng.sourceforge.io", result.stdout)
         checksum = run_cli("info", "intel-hex", "--json").json()

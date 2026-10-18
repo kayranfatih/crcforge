@@ -10,8 +10,10 @@ from pathlib import Path
 from typing import Any
 
 ROOT = Path(__file__).resolve().parents[1]
-if str(ROOT / "src") not in sys.path:
-    sys.path.insert(0, str(ROOT / "src"))
+# Always test the code in src/, ahead of an installed copy or the checkout root.
+while str(ROOT / "src") in sys.path:
+    sys.path.remove(str(ROOT / "src"))
+sys.path.insert(0, str(ROOT / "src"))
 
 from crcforge.cli import main  # noqa: E402
 
