@@ -127,6 +127,16 @@ class SolveTest(unittest.TestCase):
         self.assertTrue(any("scanned" in note for note in result.notes))
         self.assert_sound(result.crc_matches, samples)
 
+    def test_catalog_match_skips_the_slow_scan_unless_exhaustive(self) -> None:
+        algorithm = get_algorithm("crc-16-xmodem")
+        samples = [Sample(data, algorithm.compute(data)) for data in (b"A", b"BCD", b"EFGHI", b"JKLMNOP")]
+        quick = solve(samples, 16, swap_checksums=False, reflections=[(False, False)])
+        self.assertEqual([m.algorithm.name for m in quick.catalog_matches], ["crc-16-xmodem"])
+        self.assertTrue(any("scan was skipped" in note for note in quick.notes))
+        full = solve(samples, 16, swap_checksums=False, reflections=[(False, False)], exhaustive=True)
+        self.assertTrue(any("scanned" in note for note in full.notes))
+        self.assertIn("crc-16-xmodem", [m.catalog_name for m in full.crc_matches])
+
     def test_under_determined_scan_is_refused_with_a_note(self) -> None:
         rng = random.Random(5)
         secret = random_crc(rng, 16)

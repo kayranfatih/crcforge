@@ -146,6 +146,37 @@ class LinearSystemTest(unittest.TestCase):
         rows = [0b1_01, 0b0_10]  # x0 = 1, x1 = 0
         self.assertEqual(gf2.solve_linear(rows, 2), (0b01, []))
 
+    def test_column_solver_agrees_with_row_elimination(self) -> None:
+        rng = random.Random(21)
+        for _ in range(300):
+            variables = rng.randrange(1, 20)
+            equations = rng.randrange(1, 40)
+            columns = [rng.getrandbits(equations) for _ in range(variables)]
+            target = rng.getrandbits(equations) if rng.random() < 0.5 else 0
+            if rng.random() < 0.5:  # make it consistent
+                secret = rng.getrandbits(variables)
+                target = 0
+                for index, column in enumerate(columns):
+                    if (secret >> index) & 1:
+                        target ^= column
+            rows = []
+            for bit in range(equations):
+                coefficients = sum(((column >> bit) & 1) << index for index, column in enumerate(columns))
+                rows.append(coefficients | (((target >> bit) & 1) << variables))
+            by_rows = gf2.solve_linear(rows, variables)
+            by_columns = gf2.solve_columns(columns, target)
+            self.assertEqual(by_rows is None, by_columns is None)
+            if by_columns is None or by_rows is None:
+                continue
+            particular, nullspace = by_columns
+            self.assertEqual(len(nullspace), len(by_rows[1]))
+            for vector in gf2.span(particular, nullspace, 32):
+                combined = 0
+                for index, column in enumerate(columns):
+                    if (vector >> index) & 1:
+                        combined ^= column
+                self.assertEqual(combined, target)
+
     def test_span_limit(self) -> None:
         self.assertEqual(len(list(gf2.span(0, [1, 2, 4], 5))), 5)
 

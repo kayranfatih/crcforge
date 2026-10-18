@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import argparse
+import re
 import sys
+import textwrap
 from collections.abc import Callable, Sequence
 from pathlib import Path
 
@@ -132,6 +134,19 @@ def value_json(value: int, width: int) -> dict[str, object]:
 
 def mode_tag(input_mode: str, crc_mode: str, show_input: bool = True) -> str:
     return f"[input:{input_mode}][crc:{crc_mode}]" if show_input else f"[crc:{crc_mode}]"
+
+
+def report_skipped(out: Output, skipped: Sequence[tuple[str, str]]) -> None:
+    """One compact note for byte-order modes that were not scanned."""
+    if not skipped:
+        return
+    parts = []
+    for mode, reason in skipped:
+        length = re.match(r"Input length \((\d+) bytes\) must be a multiple of (\d+) bytes", reason)
+        if length:
+            reason = f"{length.group(1)} bytes is not a multiple of {length.group(2)}"
+        parts.append(f"{mode} ({reason})")
+    out.note("Skipped byte orders: " + "; ".join(parts) + ".")
 
 
 def coincidence_note(out: Output, sample_count: int, width: int, match_count: int) -> None:
@@ -504,8 +519,7 @@ def handle_find(args: argparse.Namespace, out: Output) -> int:
     out.kv("Checksum", format_value(checksum.value, display_width))
     out.kv("Original data", io_helpers.detect_original_data_kind(args))
     out.kv("Byte-order scan", "all supported modes" if args.scan_byte_order else args.byte_order)
-    for mode, reason in skipped:
-        out.warn(f"Skipped [{mode}]: {reason}")
+    report_skipped(out, skipped)
     if not matches:
         out.kv("Matches", "0", status="warn")
         out.failure("No catalogued CRC or checksum algorithm matched.")
@@ -562,8 +576,7 @@ def handle_brute(args: argparse.Namespace, out: Output) -> int:
     out.kv("Original data", data_summary(args, data))
     out.kv("Tried", f"{tested} algorithm/checksum combinations across {scanned} input byte-order modes.")
     out.kv("Algorithms", f"{len(algorithm_names)} built-in entries")
-    for mode, reason in skipped:
-        out.warn(f"Skipped [{mode}]: {reason}")
+    report_skipped(out, skipped)
     if not matches:
         out.failure("Brute scan found no catalogued CRC or checksum match.")
         out.note("For a custom CRC, add --poly SPEC or --full-custom; with several samples use 'crcforge solve'.")
@@ -658,8 +671,7 @@ def run_custom_brute(args: argparse.Namespace, out: Output) -> int:
             "Evaluations",
             f"{work:,} across {len(views)} input/checksum views" + (f", {jobs} workers" if jobs > 1 else ""),
         )
-        for mode, reason in skipped:
-            out.warn(f"Skipped [{mode}]: {reason}")
+        report_skipped(out, skipped)
         if conventional:
             out.note(
                 "With one sample, a free init and a free xorout fit every polynomial, so both were limited to "
@@ -790,7 +802,7 @@ def print_solve_result(out: Output, result: SolveResult, show_modes: bool, all_s
         out.detail("List them with --all-solutions or --json; more or longer samples rule them out.", status="dim")
         derived_notes: list[str] = []
     else:
-        derived_notes = result.derived_notes
+        derived_notes = result.derived_notes if groups else []
         shown = groups if all_solutions else groups[:DERIVED_DISPLAY_LIMIT]
         for group in shown:
             first = group[0]
@@ -799,7 +811,8 @@ def print_solve_result(out: Output, result: SolveResult, show_modes: bool, all_s
             if first.catalog_name:
                 out.detail(f"= {first.catalog_name} (built-in)")
             for twin in group[1:]:
-                pair = f"init=0x{twin.algorithm.init:X} xorout=0x{twin.algorithm.xor_out:X}"
+                digits = max(1, (twin.algorithm.width + 3) // 4)
+                pair = f"init=0x{twin.algorithm.init:0{digits}x} xorout=0x{twin.algorithm.xor_out:0{digits}x}"
                 out.detail(f"or {pair} (equivalent)", status="dim")
             if first.free_bits and len(group) == 1:
                 out.detail("init/xorout: one of several equivalent pairs for these samples", status="dim")
@@ -819,8 +832,7 @@ def print_solve_result(out: Output, result: SolveResult, show_modes: bool, all_s
             out.kv(
                 "Checksum", f"{tag(match.input_mode, match.crc_mode)}{match_label(match.algorithm)}", status="success"
             )
-    for mode, reason in result.skipped_modes:
-        out.note(f"Skipped [{mode}]: {reason}")
+    report_skipped(out, result.skipped_modes)
     for note in [*result.notes, *derived_notes]:
         out.note(note)
 
@@ -839,6 +851,7 @@ def solve_settings(args: argparse.Namespace, width: int) -> dict[str, object]:
         ],
         "byte_order_modes": BYTE_ORDER_MODES if args.scan_byte_order else ("native",),
         "limit": args.limit,
+        "exhaustive": args.all_solutions,
     }
 
 
@@ -1281,17 +1294,28 @@ def add_byte_order(parser: argparse.ArgumentParser, allow_scan: bool = False) ->
 
 def add_crc_params(parser: argparse.ArgumentParser, spec: bool) -> None:
     group = parser.add_argument_group("custom CRC parameters" + (" (VALUE, A,B,C or START:END[:STEP])" if spec else ""))
-    group.add_argument("--width", type=int, help="CRC width in bits.")
-    group.add_argument("--poly", help="Polynomial" + (" spec." if spec else " (without the top bit)."))
+    value = "SPEC" if spec else "VALUE"
+    flag = "true|false|auto" if spec else "true|false"
+    group.add_argument("--width", type=int, metavar="BITS", help="CRC width in bits.")
     group.add_argument(
-        "--init", help="Initial register value (RevEng notation). Default: 0." if not spec else "init spec."
-    )
-    group.add_argument("--xor-out", dest="xor_out", help="Final XOR value. Default: 0." if not spec else "xorout spec.")
-    group.add_argument(
-        "--refin", help="Reflect input bytes: true or false." + (" Default: auto." if spec else " Default: false.")
+        "--poly", metavar=value, help="Polynomial without the top bit" + (" (values to try)." if spec else ".")
     )
     group.add_argument(
-        "--refout", help="Reflect the output: true or false." + (" Default: auto." if spec else " Default: false.")
+        "--init",
+        metavar=value,
+        help="Initial register value in RevEng notation" + (" (values to try)." if spec else ". Default: 0."),
+    )
+    group.add_argument(
+        "--xor-out",
+        dest="xor_out",
+        metavar=value,
+        help="Final XOR value" + (" (values to try)." if spec else ". Default: 0."),
+    )
+    group.add_argument(
+        "--refin", metavar=flag, help="Reflect each input byte." + (" Default: auto." if spec else " Default: false.")
+    )
+    group.add_argument(
+        "--refout", metavar=flag, help="Reflect the result." + (" Default: auto." if spec else " Default: false.")
     )
 
 
@@ -1321,9 +1345,11 @@ def add_frame_options(parser: argparse.ArgumentParser, auto: bool) -> None:
         help="Byte order of the stored checksum. Default: auto (try both).",
     )
     if auto:
-        group.add_argument("--skip", default="0", help="Header bytes excluded from the data, or 'auto' (0-8).")
+        group.add_argument(
+            "--skip", default="0", metavar="N|auto", help="Header bytes excluded from the data, or 'auto' (0-8)."
+        )
     else:
-        group.add_argument("--skip", type=int, default=0, help="Header bytes excluded from the data.")
+        group.add_argument("--skip", type=int, default=0, metavar="N", help="Header bytes excluded from the data.")
 
 
 DESCRIPTION = f"""{{banner}}
@@ -1373,7 +1399,7 @@ def build_parser() -> argparse.ArgumentParser:
         sub = subparsers.add_parser(
             name,
             help=help_text,
-            description=description,
+            description=textwrap.fill(description, 88),
             epilog=epilog or None,
             formatter_class=HelpFormatter,
             parents=[common],
@@ -1447,12 +1473,17 @@ def build_parser() -> argparse.ArgumentParser:
         help="Custom mode: search every poly (and free init/xorout); width defaults to the checksum's digits.",
     )
     brute.add_argument(
-        "--max-combinations", type=int, default=50_000_000, help="Safety limit on evaluations. Default: 50,000,000."
+        "--max-combinations",
+        type=int,
+        default=50_000_000,
+        metavar="N",
+        help="Safety limit on evaluations. Default: 50,000,000.",
     )
-    brute.add_argument("--limit", type=int, default=100, help="Maximum matches to show. Default: 100.")
-    brute.add_argument("--jobs", type=int, default=0, help="Worker processes; 0 = automatic. Default: 0.")
+    brute.add_argument("--limit", type=int, default=100, metavar="N", help="Maximum matches to show. Default: 100.")
+    brute.add_argument("--jobs", type=int, default=0, metavar="N", help="Worker processes; 0 = automatic (default).")
     brute.add_argument(
         "--progress-interval",
+        metavar="SECONDS",
         type=float,
         default=2.0,
         help="Seconds between progress lines when not on a terminal; 0 disables progress.",
@@ -1486,12 +1517,15 @@ def build_parser() -> argparse.ArgumentParser:
     solve_parser.add_argument(
         "--scan-byte-order", action="store_true", help="Also try byte-order transforms of the data."
     )
-    solve_parser.add_argument("--limit", type=int, default=64, help="Maximum CRC solutions to compute. Default: 64.")
+    solve_parser.add_argument(
+        "--limit", type=int, default=64, metavar="N", help="Maximum CRC solutions to compute. Default: 64."
+    )
     solve_parser.add_argument(
         "--all-solutions", action="store_true", help="List every fitting parameter set, not just the likely answer."
     )
     solve_parser.add_argument(
         "--progress-interval",
+        metavar="SECONDS",
         type=float,
         default=2.0,
         help="Seconds between progress lines when not on a terminal; 0 disables progress.",

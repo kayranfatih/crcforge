@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import importlib.util
 import random
 import shutil
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -13,6 +15,17 @@ from crcforge.codegen import CodegenError, generate, identifier
 from crcforge.crc import CrcAlgorithm, calculate_crc
 
 NATIVE = [a for a in get_algorithms(family="crc") if isinstance(a, CrcAlgorithm) and a.width <= 64]
+
+
+def c_compiler() -> list[str] | None:
+    """gcc/cc when installed, otherwise the clang-based compiler bundled with the ziglang package."""
+    for name in ("gcc", "cc"):
+        path = shutil.which(name)
+        if path:
+            return [path]
+    if importlib.util.find_spec("ziglang") is not None:
+        return [sys.executable, "-m", "ziglang", "cc"]
+    return None
 
 
 class PythonCodegenTest(unittest.TestCase):
@@ -58,9 +71,9 @@ class NativeCodegenTest(unittest.TestCase):
         with self.assertRaises(CodegenError):
             generate(get_algorithm("sum-8"), "c")  # type: ignore[arg-type]
 
-    @unittest.skipUnless(shutil.which("gcc") or shutil.which("cc"), "no C compiler")
+    @unittest.skipUnless(c_compiler(), "no C compiler")
     def test_generated_c_compiles_and_matches_check_values(self) -> None:
-        compiler = shutil.which("gcc") or shutil.which("cc")
+        compiler = c_compiler()
         assert compiler
         with tempfile.TemporaryDirectory() as directory:
             parts = ["#include <stdio.h>"]
@@ -76,7 +89,8 @@ class NativeCodegenTest(unittest.TestCase):
             path = Path(directory) / "crcs.c"
             path.write_text(source)
             binary = Path(directory) / "crcs"
-            subprocess.run([compiler, "-std=c99", "-Wall", "-Werror", "-O1", str(path), "-o", str(binary)], check=True)
+            flags = ["-std=c99", "-Wall", "-Wextra", "-Werror", "-pedantic", "-O1"]
+            subprocess.run([*compiler, *flags, str(path), "-o", str(binary)], check=True)
             output = subprocess.run([str(binary)], check=True, capture_output=True, text=True).stdout.split()
         self.assertEqual([int(value, 16) for value in output], [a.check for a in NATIVE])
 

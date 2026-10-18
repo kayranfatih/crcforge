@@ -106,18 +106,6 @@ def sample_variants(samples: Sequence[Sample], width: int) -> list[tuple[str, li
     return variants
 
 
-def _coefficient_rows(columns: Sequence[int], width: int) -> list[int]:
-    """Transpose init columns into one coefficient row per output bit."""
-    rows = []
-    for bit in range(width):
-        coefficients = 0
-        for index, column in enumerate(columns):
-            if (column >> bit) & 1:
-                coefficients |= 1 << index
-        rows.append(coefficients)
-    return rows
-
-
 def solve_init_xorout(
     samples: Sequence[Sample],
     width: int,
@@ -151,56 +139,66 @@ def solve_init_xorout(
         return _enumerate_init(terms, init_values, xorout_set, limit)
 
     if xorout_values is not None and len(xorout_values) <= ENUMERATE_LIMIT:
+        # Every sample gives Z_i·init = rhs_i ^ xorout; stack the samples into tall columns.
+        stacked = [0] * width
+        for index, (columns, _) in enumerate(terms):
+            for bit, column in enumerate(columns):
+                stacked[bit] |= column << (index * width)
+        solver = gf2.ColumnSolver(stacked)
         pairs: list[tuple[int, int]] = []
-        coefficient_rows = [_coefficient_rows(columns, width) for columns, _ in terms]
-        max_free = 0
         for xorout in xorout_values:
-            xorout_rows: list[int] = []
-            for (_, rhs), sample_rows in zip(terms, coefficient_rows, strict=True):
-                target = rhs ^ xorout
-                xorout_rows.extend(sample_rows[bit] | (((target >> bit) & 1) << width) for bit in range(width))
-            solved = gf2.solve_linear(xorout_rows, width)
-            if solved is None:
+            target = 0
+            for index, (_, rhs) in enumerate(terms):
+                target |= (rhs ^ xorout) << (index * width)
+            particular = solver.solve(target)
+            if particular is None:
                 continue
-            particular, basis = solved
-            max_free = max(max_free, len(basis))
-            for init in gf2.span(particular, basis, limit):
+            for init in gf2.span(particular, solver.nullspace, limit):
                 if init_set is None or init in init_set:
                     pairs.append((init, xorout))
                     if len(pairs) >= limit:
-                        return InitXorSolutions(tuple(pairs), max_free, True)
-        return InitXorSolutions(tuple(pairs), max_free) if pairs else None
+                        return InitXorSolutions(tuple(pairs), len(solver.nullspace), True)
+        return InitXorSolutions(tuple(pairs), len(solver.nullspace)) if pairs else None
 
-    rows: list[int] = []
-    for columns, rhs in terms:
-        for bit, coefficients in enumerate(_coefficient_rows(columns, width)):
-            rows.append(coefficients | (1 << (width + bit)) | (((rhs >> bit) & 1) << (2 * width)))
-    solved = gf2.solve_linear(rows, 2 * width)
+    # Both free: subtracting the first sample removes xorout, (Z_i ^ Z_0)·init = rhs_i ^ rhs_0;
+    # xorout then follows from the first sample.
+    columns0, rhs0 = terms[0]
+    stacked = [0] * width
+    target = 0
+    for index, (columns, rhs) in enumerate(terms[1:]):
+        shift = index * width
+        for bit in range(width):
+            stacked[bit] |= (columns[bit] ^ columns0[bit]) << shift
+        target |= (rhs ^ rhs0) << shift
+    solved = gf2.solve_columns(stacked, target)
     if solved is None:
         return None
     particular, basis = solved
+
+    def pair(init: int) -> tuple[int, int]:
+        return init, rhs0 ^ apply_columns(columns0, init)
+
     if basis and init_set is None and xorout_set is None:
         # Under-determined: every pair in the solution space produces identical checksums for these
-        # samples. Report the conventional choices when they fit, otherwise one representative.
+        # samples. List them when there are few; otherwise the conventional choices or one representative.
         if len(basis) <= SMALL_AMBIGUITY_BITS:
-            vectors = list(gf2.span(particular, basis, 1 << len(basis)))
-            pairs = sorted(((v & mask, v >> width) for v in vectors), key=lambda p: (p[0] not in (0, mask), p))
+            pairs = sorted(
+                map(pair, gf2.span(particular, basis, 1 << len(basis))), key=lambda p: (p[0] not in (0, mask), p)
+            )
             return InitXorSolutions(tuple(pairs[:limit]), len(basis), len(pairs) > limit)
         conventional = _enumerate_init(terms, (0, mask), None, limit)
         if conventional is not None:
             return InitXorSolutions(conventional.pairs, len(basis), True)
-        return InitXorSolutions(((particular & mask, particular >> width),), len(basis), True)
+        return InitXorSolutions((pair(particular),), len(basis), True)
     pairs = []
-    truncated = False
-    for vector in gf2.span(particular, basis, ENUMERATE_LIMIT * 4):
-        init, xorout = vector & mask, vector >> width
+    truncated = (1 << len(basis)) > ENUMERATE_LIMIT * 4
+    for init in gf2.span(particular, basis, ENUMERATE_LIMIT * 4):
+        init, xorout = pair(init)
         if (init_set is None or init in init_set) and (xorout_set is None or xorout in xorout_set):
             pairs.append((init, xorout))
             if len(pairs) >= limit:
                 truncated = True
                 break
-    if (1 << len(basis)) > ENUMERATE_LIMIT * 4:
-        truncated = True
     return InitXorSolutions(tuple(pairs), len(basis), truncated) if pairs else None
 
 
@@ -324,9 +322,14 @@ def solve(
     swap_checksums: bool = True,
     scan_limit: int = 1 << 16,
     limit: int = 64,
+    exhaustive: bool = False,
     progress: Callable[[int, int], None] | None = None,
 ) -> SolveResult:
-    """Identify the algorithm behind a set of samples: catalog, derived CRC parameters and sum layouts."""
+    """Identify the algorithm behind a set of samples: catalog, derived CRC parameters and sum layouts.
+
+    The slow polynomial scan (needed only when no two samples share a length) is skipped when a
+    catalog algorithm already fits, unless ``exhaustive`` is true.
+    """
     if not samples:
         raise ValueError("At least one sample is required.")
     if width <= 0:
@@ -340,6 +343,7 @@ def solve(
     result = SolveResult(width=width, sample_count=len(samples), lengths=lengths)
     seen_crcs: set[tuple[object, ...]] = set()
     seen_catalog: set[tuple[str, str, str]] = set()
+    prepared: list[tuple[str, str, list[Sample]]] = []
 
     views = distinct_views([sample.data for sample in samples], byte_order_modes)
     for mode, datasets, reason in views:
@@ -349,6 +353,7 @@ def solve(
         mode_samples = [Sample(data, sample.checksum) for data, sample in zip(datasets, samples, strict=True)]
         variants = sample_variants(mode_samples, width) if swap_checksums else [("as-given", mode_samples)]
         for crc_mode, variant_samples in variants:
+            prepared.append((mode, crc_mode, variant_samples))
             for algorithm in match_catalog(variant_samples, width=width):
                 key = (algorithm.name, mode, crc_mode)
                 if key not in seen_catalog:
@@ -359,21 +364,25 @@ def solve(
                 fits = all(candidate.compute(s.data) == s.checksum for s in variant_samples)
                 if fits and not any(m.algorithm.params() == candidate.params() for m in result.checksum_matches):
                     result.checksum_matches.append(CatalogMatch(candidate, mode, crc_mode))
-            _solve_crc(
-                variant_samples,
-                width,
-                mode,
-                crc_mode,
-                result,
-                seen_crcs,
-                poly_values,
-                init_values,
-                xorout_values,
-                reflections,
-                scan_limit,
-                limit,
-                progress,
-            )
+
+    # Derive CRC parameters only after the catalog pass, so a catalog hit in any view can skip the slow scan.
+    catalog_fits = bool(seen_catalog)
+    for mode, crc_mode, variant_samples in prepared:
+        _solve_crc(
+            variant_samples,
+            width,
+            mode,
+            crc_mode,
+            result,
+            seen_crcs,
+            poly_values,
+            init_values,
+            xorout_values,
+            reflections,
+            scan_limit if exhaustive or not catalog_fits else 0,
+            limit,
+            progress,
+        )
     return result
 
 
@@ -446,6 +455,13 @@ def _solve_crc(
                     return
 
     if not scan_reflections:
+        return
+    if scan_limit == 0 and poly_values is None:
+        _note_once(
+            result,
+            "A catalog algorithm already fits, so the slower polynomial scan was skipped "
+            "(use --all-solutions to run it anyway).",
+        )
         return
     if poly_values is not None:
         scan_polys: Sequence[int] = list(poly_values)

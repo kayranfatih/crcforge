@@ -263,6 +263,51 @@ def solve_linear(rows: Sequence[int], variable_count: int) -> tuple[int, list[in
     return solution, basis
 
 
+class ColumnSolver:
+    """Solve ``A·x = target`` over GF(2) for a matrix given column by column (as ints).
+
+    The column basis is built once, so many right-hand sides can be solved cheaply and
+    no transposition is needed.
+    """
+
+    def __init__(self, columns: Sequence[int]) -> None:
+        self._pivots: dict[int, tuple[int, int]] = {}
+        self.nullspace: list[int] = []
+        for index, column in enumerate(columns):
+            vector, combination = column, 1 << index
+            while vector:
+                pivot = vector.bit_length() - 1
+                entry = self._pivots.get(pivot)
+                if entry is None:
+                    self._pivots[pivot] = (vector, combination)
+                    break
+                vector ^= entry[0]
+                combination ^= entry[1]
+            else:
+                self.nullspace.append(combination)
+
+    def solve(self, target: int) -> int | None:
+        """One ``x`` (a combination of columns) that XORs to ``target``, or None."""
+        combination = 0
+        while target:
+            entry = self._pivots.get(target.bit_length() - 1)
+            if entry is None:
+                return None
+            target ^= entry[0]
+            combination ^= entry[1]
+        return combination
+
+
+def solve_columns(columns: Sequence[int], target: int) -> tuple[int, list[int]] | None:
+    """Find ``x`` such that the XOR of ``columns[j]`` over the set bits ``j`` of ``x`` equals ``target``.
+
+    Returns ``(particular_solution, nullspace_basis)`` or ``None``.
+    """
+    solver = ColumnSolver(columns)
+    particular = solver.solve(target)
+    return None if particular is None else (particular, solver.nullspace)
+
+
 def span(particular: int, basis: Sequence[int], limit: int) -> Iterator[int]:
     """Enumerate ``particular`` plus every combination of ``basis`` vectors (up to ``limit``)."""
     for index in range(min(1 << len(basis), limit)):
