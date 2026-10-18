@@ -17,6 +17,7 @@ ANSI_WARN = "\033[38;5;214m"
 ANSI_ERROR = "\033[38;5;196m"
 ANSI_SUCCESS = "\033[38;5;82m"
 ANSI_DIM = "\033[38;5;245m"
+ANSI_VALUE = "\033[1;38;5;84m"
 
 _PALETTE = {
     "info": ANSI_INFO,
@@ -25,7 +26,13 @@ _PALETTE = {
     "error": ANSI_ERROR,
     "text": ANSI_TEXT,
     "dim": ANSI_DIM,
+    "frame": ANSI_FRAME,
+    "credit": ANSI_CREDIT,
+    "value": ANSI_VALUE,
 }
+
+# Characters the fancier output needs; without them the output falls back to plain ASCII.
+_UNICODE_PROBE = "█╔╗╚╝═║─·"
 
 LABEL_WIDTH = 16
 
@@ -37,6 +44,17 @@ def supports_color(stream: object | None = None) -> bool:
     if os.getenv("FORCE_COLOR") is not None:
         return True
     return bool(getattr(target, "isatty", lambda: False)())
+
+
+def supports_unicode(stream: object | None = None) -> bool:
+    """Whether the stream's encoding can show box-drawing characters (cp1252 files cannot)."""
+    target = stream if stream is not None else sys.stdout
+    encoding = getattr(target, "encoding", None) or "ascii"
+    try:
+        _UNICODE_PROBE.encode(encoding)
+    except (UnicodeEncodeError, LookupError):
+        return False
+    return True
 
 
 def colorize(text: str, ansi_code: str, enabled: bool) -> str:
@@ -71,6 +89,7 @@ class Output:
         self.stderr = stderr if stderr is not None else sys.stderr
         self.color = supports_color(self.stdout) if color is None else color
         self.color_err = supports_color(self.stderr) if color is None else color
+        self.unicode = supports_unicode(self.stdout)
 
     @property
     def human(self) -> bool:
@@ -78,6 +97,20 @@ class Output:
 
     def _style(self, text: str, status: str) -> str:
         return colorize(text, _PALETTE.get(status, ANSI_INFO), self.color)
+
+    def style(self, text: str, status: str) -> str:
+        """Color a fragment for composing custom lines (no-op without color)."""
+        return self._style(text, status)
+
+    def rule(self, title: str, detail: str = "", width: int = 72) -> None:
+        """A group heading such as ``── 16-bit ────────── 31 CRCs, 8 checksums``."""
+        if not self.human:
+            return
+        dash = "─" if self.unicode else "-"
+        head = f"{dash * 2} {title} "
+        tail = f" {detail}" if detail else ""
+        fill = dash * max(3, width - len(head) - len(tail))
+        self.line(self._style(head, "frame") + self._style(fill, "dim") + self._style(tail, "dim"))
 
     def line(self, text: str = "") -> None:
         print(text, file=self.stdout)

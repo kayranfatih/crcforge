@@ -9,7 +9,10 @@ from pathlib import Path
 from unittest import mock
 
 from _support import run_cli
+from crcforge import __version__
+from crcforge.banner import render_banner, render_credit_lines
 from crcforge.cli import build_parser
+from crcforge.output import supports_unicode
 from crcforge.solver import ScanResult
 
 MODBUS_FRAMES = ["010300000001840A", "010300000002C40B", "01030000000AC5CD", "0106000100FF984A"]
@@ -89,6 +92,33 @@ class GeneralTest(unittest.TestCase):
         self.assertIn("Fatih Kayran", result.stdout)
         self.assertIn("Fatih Kayran", run_cli("--show-banner", "list", "--width", "3").stdout)
 
+    def test_banner_styles(self) -> None:
+        fancy = render_banner(color=False, unicode=True)
+        self.assertIn("██████╗", fancy)
+        self.assertIn(f"v{__version__}", fancy)
+        logo = fancy.splitlines()[:6]
+        self.assertEqual(len(logo), 6)
+        self.assertLessEqual(max(len(line) for line in logo), 72)  # fits an 80-column terminal
+        plain = render_banner(color=False, unicode=False)
+        plain.encode("ascii")  # the fallback is pure ASCII
+        self.assertIn("____", plain)
+        self.assertIn("\033[", render_banner(color=True, unicode=True))
+        self.assertNotIn("\033[", render_banner(color=False, unicode=True))
+        self.assertEqual(
+            render_credit_lines(color=False, unicode=False).encode("ascii").decode(),
+            "by Fatih Kayran\nX/Twitter: @kayranfatih",
+        )
+
+    def test_unicode_detection(self) -> None:
+        class Stream:
+            def __init__(self, encoding: str | None) -> None:
+                self.encoding = encoding
+
+        self.assertTrue(supports_unicode(Stream("utf-8")))
+        self.assertFalse(supports_unicode(Stream("cp1252")))
+        self.assertFalse(supports_unicode(Stream(None)))
+        self.assertFalse(supports_unicode(Stream("no-such-codec")))
+
 
 class CalcTest(unittest.TestCase):
     def test_built_in_forms(self) -> None:
@@ -156,6 +186,30 @@ class CalcTest(unittest.TestCase):
         self.assertEqual(len(data["results"]), 134)
         human = run_cli("calc", "123456789", "--all", "--width", "8")
         self.assertIn("All Catalog Results", human.stdout)
+
+    def test_all_is_grouped_by_width_with_types(self) -> None:
+        result = run_cli("calc", "0x010300000001", "--all")
+        lines = result.stdout.splitlines()
+        self.assertIn("134 (113 CRCs, 21 checksums)", result.stdout)
+        header = next(line for line in lines if " 16-bit " in line)
+        self.assertTrue(header.startswith("-- 16-bit "))  # ASCII rule: the captured stream has no encoding
+        self.assertTrue(header.endswith("31 CRCs, 8 checksums"))
+        group = lines[lines.index(header) + 1 : lines.index(header) + 40]
+        self.assertTrue(group[0].split()[0].startswith("crc-16-"))  # CRCs first ...
+        self.assertEqual(group[-1].split()[0], "xor-16")  # ... then checksums
+        modbus = next(line for line in group if line.split()[0] == "crc-16-modbus")
+        self.assertEqual(modbus.split()[1:], ["CRC", "0x0A84", "2692"])
+        self.assertIn("one's compl.", result.stdout)
+        widths = [int(line.split("-bit")[0].split()[-1]) for line in lines if line.startswith("-- ")]
+        self.assertEqual(widths, sorted(widths))
+        hex_only = run_cli("calc", "0x010300000001", "--all", "--width", "16", "--output-format", "hex")
+        self.assertIn("crc-16-modbus", hex_only.stdout)
+        self.assertNotIn("2692", hex_only.stdout)
+
+    def test_hex_looking_text_gets_a_note(self) -> None:
+        result = run_cli("calc", "crc-16-modbus", "010300000001")
+        self.assertIn("write 0x010300000001", result.stdout)
+        self.assertNotIn("write 0x", run_cli("calc", "crc-16-modbus", "123456789").stdout)
 
     def test_stdin_and_files_and_ranges(self) -> None:
         self.assertEqual(run_cli("calc", "crc-32", "-", "-q", stdin=b"123456789").stdout.strip(), "0xCBF43926")

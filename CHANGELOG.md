@@ -4,6 +4,17 @@ All notable changes to CRCForge are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow
 [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Added
+
+- A note when plain-text input looks like hex (for example `010300000001`), showing the `0x` form that reads it as bytes.
+
+### Changed
+
+- `calc --all` prints a table grouped by width, CRCs first and then checksums, with a type column (CRC, sum, one's/two's complement, XOR, Fletcher, ...) and colors.
+- New banner: gradient block letters with a tagline and the version. Terminals and files that cannot show those characters get the previous ASCII banner.
+
 ## [1.1.0] - 2026-10-18
 
 ### Added

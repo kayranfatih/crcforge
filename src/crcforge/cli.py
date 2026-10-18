@@ -11,6 +11,7 @@ from pathlib import Path
 
 from . import __version__
 from . import io as io_helpers
+from .banner import render_banner, render_credit_lines
 from .byteorder import BYTE_ORDER_MODES, describe_byte_order, distinct_views, transform_byte_order
 from .catalog import (
     CHECK_INPUT,
@@ -22,13 +23,23 @@ from .catalog import (
     get_algorithms,
     validate_catalog,
 )
-from .checksums import CARRY_MODES, COMPLEMENT_MODES, ENDIAN_MODES, SumChecksum
+from .checksums import (
+    CARRY_MODES,
+    COMPLEMENT_MODES,
+    ENDIAN_MODES,
+    Adler32Checksum,
+    BsdChecksum,
+    FletcherChecksum,
+    SumChecksum,
+    SysvChecksum,
+    XorChecksum,
+)
 from .codegen import LANGUAGES, CodegenError, generate
 from .crc import CrcAlgorithm, calculate_residue, format_value, validate_params
 from .forge import ForgeError, forge
 from .frames import DEFAULT_FRAME_WIDTHS, POSITIONS, FrameLayout, candidate_layouts
 from .io import InputError, format_bytes, format_crc_result, parse_checksum_value, parse_value_spec
-from .output import ANSI_CREDIT, ANSI_FRAME, ANSI_TEXT, Output, colorize, supports_color
+from .output import Output
 from .records import check_records
 from .solver import (
     ENUMERATE_LIMIT,
@@ -45,18 +56,6 @@ from .solver import (
 )
 
 TOOL_NAME = "CRCForge"
-PLAIN_BANNER = r"""
-+-----------------------------------------------------------+
-|   ____ ____   ____ _____ ___  ____   ____ _____           |
-|  / ___|  _ \ / ___|  ___/ _ \|  _ \ / ___| ____|          |
-| | |   | |_) | |   | |_ | | | | |_) | |  _|  _|            |
-| | |___|  _ <| |___|  _|| |_| |  _ <| |_| | |___           |
-|  \____|_| \_\\____|_|   \___/|_| \_\\____|_____|          |
-|                                                           |
-+-----------------------------------------------------------+
-""".strip("\n")
-AUTHOR_LINE = "by Fatih Kayran"
-SOCIAL_LINE = "X/Twitter: @kayranfatih"
 
 EXIT_OK = 0
 EXIT_NO_MATCH = 1
@@ -83,20 +82,6 @@ class CliError(InputError):
 
 
 # --- Presentation helpers ------------------------------------------------------------------
-
-
-def render_banner(color: bool | None = None) -> str:
-    colored = supports_color() if color is None else color
-    lines = []
-    for line in PLAIN_BANNER.splitlines():
-        code = ANSI_FRAME if line.startswith(("+", "|")) else ANSI_TEXT
-        lines.append(colorize(line, code, colored))
-    return "\n".join(lines)
-
-
-def render_credit_lines(color: bool | None = None) -> str:
-    colored = supports_color() if color is None else color
-    return "\n".join((colorize(AUTHOR_LINE, ANSI_CREDIT, colored), colorize(SOCIAL_LINE, ANSI_CREDIT, colored)))
 
 
 def plural(count: int, noun: str, plural_form: str | None = None) -> str:
@@ -442,18 +427,75 @@ def calc_all(args: argparse.Namespace, out: Output) -> int:
             }
         )
         return EXIT_OK
-    name_width = max((len(algorithm.name) for algorithm, _ in results), default=10)
     if out.quiet:
         for algorithm, value in results:
             out.value(f"{algorithm.name} {format_value(value, algorithm.width)}")
         return EXIT_OK
+
+    crc_count = sum(1 for algorithm, _ in results if algorithm.family == "crc")
     out.section("All Catalog Results")
     out.kv("Original data", data_summary(args, data))
-    out.kv("Algorithms", str(len(results)))
-    for algorithm, value in results:
-        out.line(f"  {algorithm.name:{name_width}}  {format_crc_result(value, algorithm.width, args.output_format)}")
+    if args.byte_order != "native":
+        out.kv("Byte order", f"{args.byte_order} ({describe_byte_order(args.byte_order)})")
+    out.kv(
+        "Algorithms",
+        f"{len(results)} ({plural(crc_count, 'CRC')}, {plural(len(results) - crc_count, 'checksum')})",
+    )
+    print_results_table(out, results, args.output_format)
     emit_input_note(out, args)
     return EXIT_OK
+
+
+_KIND_LABELS: dict[type, str] = {
+    CrcAlgorithm: "CRC",
+    XorChecksum: "XOR",
+    FletcherChecksum: "Fletcher",
+    Adler32Checksum: "Adler",
+    BsdChecksum: "BSD sum",
+    SysvChecksum: "SysV sum",
+}
+
+
+def kind_label(algorithm: Algorithm) -> str:
+    """A short type name for tables: CRC, sum, one's/two's complement, XOR, ..."""
+    if isinstance(algorithm, SumChecksum):
+        return {"ones": "one's compl.", "twos": "two's compl."}.get(algorithm.complement, "sum")
+    return _KIND_LABELS.get(type(algorithm), "checksum")
+
+
+def print_results_table(out: Output, results: Sequence[tuple[Algorithm, int]], output_format: str) -> None:
+    """Results grouped by width: CRCs first, then checksums, with aligned value columns."""
+    name_width = max((len(algorithm.name) for algorithm, _ in results), default=10)
+    kind_width = max((len(kind_label(algorithm)) for algorithm, _ in results), default=3)
+    by_width: dict[int, list[tuple[Algorithm, int]]] = {}
+    for algorithm, value in results:
+        by_width.setdefault(algorithm.width, []).append((algorithm, value))
+    for width, group in sorted(by_width.items()):
+        group.sort(key=lambda item: (item[0].family != "crc", item[0].name))
+        crcs = sum(1 for algorithm, _ in group if algorithm.family == "crc")
+        counts = []
+        if crcs:
+            counts.append(plural(crcs, "CRC"))
+        if len(group) > crcs:
+            counts.append(plural(len(group) - crcs, "checksum"))
+        out.line()
+        out.rule(f"{width}-bit", ", ".join(counts))
+        hex_width = max(len(format_value(value, width)) for _, value in group)
+        dec_width = max(len(str(value)) for _, value in group)
+        for algorithm, value in group:
+            name = out.style(f"{algorithm.name:<{name_width}}", "text" if algorithm.family == "crc" else "credit")
+            kind = out.style(f"{kind_label(algorithm):<{kind_width}}", "dim")
+            hex_text = out.style(f"{format_value(value, width):>{hex_width}}", "value")
+            dec_text = f"{value:>{dec_width}}"
+            if output_format == "hex":
+                cells = hex_text
+            elif output_format == "dec":
+                cells = out.style(dec_text, "value")
+            elif output_format == "bin":
+                cells = out.style(f"0b{value:0{width}b}", "value")
+            else:
+                cells = f"{hex_text}  {out.style(dec_text, 'dim')}"
+            out.line(f"  {name}  {kind}  {cells}")
 
 
 def catalog_search(
@@ -1237,8 +1279,8 @@ def handle_self_test(args: argparse.Namespace, out: Output) -> int:
 
 
 def handle_banner(args: argparse.Namespace, out: Output) -> int:
-    out.line(render_banner(out.color))
-    out.line(render_credit_lines(out.color))
+    out.line(render_banner(out.color, out.unicode))
+    out.line(render_credit_lines(out.color, out.unicode))
     return EXIT_OK
 
 
@@ -1677,8 +1719,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     out = Output(json_mode=args.json, quiet=args.quiet, color=False if args.no_color else None)
     try:
         if args.show_banner and out.human:
-            out.line(render_banner(out.color))
-            out.line(render_credit_lines(out.color))
+            out.line(render_banner(out.color, out.unicode))
+            out.line(render_credit_lines(out.color, out.unicode))
         return int(args.handler(args, out))
     except UnknownAlgorithmError as error:
         hint = f"Did you mean: {', '.join(error.suggestions)}?" if error.suggestions else None

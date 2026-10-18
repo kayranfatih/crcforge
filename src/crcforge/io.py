@@ -258,13 +258,28 @@ def detect_original_data_kind(args: argparse.Namespace) -> str:
     return "plain-text"
 
 
+HEX_DIGITS = frozenset("0123456789abcdefABCDEF")
+
+
+def looks_like_hex(text: str) -> bool:
+    """Even-length runs of hex digits (spaces allowed) that were probably meant as bytes."""
+    compact = "".join(text.split())
+    return len(compact) >= 4 and len(compact) % 2 == 0 and all(character in HEX_DIGITS for character in compact)
+
+
 def text_input_note(args: argparse.Namespace) -> str | None:
-    """A note when a plain-text payload is also the name of an existing file."""
+    """A note when a plain-text payload looks like it was meant as a file or as hex bytes."""
     value = getattr(args, "original_data", "")
     if detect_original_data_kind(args) != "plain-text" or getattr(args, "as_text", False):
         return None
     if value and os.path.isfile(value):
         return f"'{value}' is the name of an existing file but was used as text; add --as-file to read its bytes."
+    if looks_like_hex(value):
+        compact = "".join(value.split())
+        return (
+            f"'{value}' was read as {len(value.encode('utf-8'))} bytes of text. "
+            f"For the {len(compact) // 2} bytes it spells in hex, write 0x{compact}."
+        )
     return None
 
 
