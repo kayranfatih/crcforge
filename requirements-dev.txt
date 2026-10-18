@@ -1,0 +1,8 @@
+# Development tools (CRCForge itself has no runtime dependencies).
+# Install with: python -m pip install -e . -r requirements-dev.txt
+pytest>=8
+pytest-cov>=5
+ruff>=0.6
+mypy>=1.10
+build>=1.2
+twine>=5
