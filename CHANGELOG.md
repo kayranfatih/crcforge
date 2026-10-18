@@ -8,7 +8,7 @@ All notable changes to CRCForge are documented here. The format follows
 
 ### Added
 
-- **`solve` command**: identifies the algorithm behind several data/checksum samples. Two or more samples of the same length give the polynomial directly via a GCD over GF(2), for any width (32- and 64-bit included). init and xorout come from a linear system. Catalog CRCs and sum/XOR layouts are checked too, and ambiguous or equivalent parameter sets are explained.
+- **`solve` command**: identifies the algorithm behind several data/checksum samples. Two or more samples of the same length give the polynomial directly via a GCD over GF(2), for any width (32- and 64-bit included). init and xorout come from a linear system. Catalog CRCs and sum/XOR layouts are checked too, and ambiguous or equivalent parameter sets are explained. When a catalog algorithm already fits, other fits are summarized in one line and the slow polynomial scan is skipped; `--all-solutions` lists everything.
 - **Frame analysis** (`solve --frames`): finds the checksum's width, position (`--crc-at`), byte order (`--crc-endian`) and skipped header bytes (`--skip`) inside captured frames. Samples can also come from a file (`--samples-file`).
 - **`forge` command**: inserts (by default appends) or overwrites bytes so the data produces a target CRC or sum/XOR checksum. `-o` writes the result to a file.
 - **`verify` command**: checks a data/checksum pair, or a frame with an embedded checksum (`--frame`).
