@@ -4,7 +4,7 @@ All notable changes to CRCForge are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow
 [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
+## [1.1.1] - 2026-10-18
 
 ### Added
 
@@ -72,5 +72,6 @@ All notable changes to CRCForge are documented here. The format follows
 
 Initial release: CRC calculation, catalog matching (`find`, `brute`), custom parameter brute force, byte-order transforms and checksum byte-swap detection, with 55 RevEng CRC definitions.
 
+[1.1.1]: https://github.com/kayranfatih/crcforge/compare/v1.1.0...v1.1.1
 [1.1.0]: https://github.com/kayranfatih/crcforge/compare/v1.0.0...v1.1.0
 [1.0.0]: https://github.com/kayranfatih/crcforge/releases/tag/v1.0.0

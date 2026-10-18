@@ -82,7 +82,7 @@ class GeneralTest(unittest.TestCase):
     def test_version(self) -> None:
         result = run_cli("--version")
         self.assertEqual(result.code, 0)
-        self.assertIn("1.1.0", result.stdout)
+        self.assertIn(__version__, result.stdout)
 
     def test_every_command_has_help_with_examples(self) -> None:
         for command in ("calc", "find", "brute", "solve", "verify", "forge", "records", "codegen", "transform", "list"):

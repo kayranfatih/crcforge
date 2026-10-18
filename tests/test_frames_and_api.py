@@ -47,7 +47,7 @@ class FrameLayoutTest(unittest.TestCase):
 
 class PublicApiTest(unittest.TestCase):
     def test_version(self) -> None:
-        self.assertEqual(crcforge.__version__, "1.1.0")
+        self.assertEqual(crcforge.__version__, "1.1.1")
 
     def test_calculate_with_name_or_object(self) -> None:
         self.assertEqual(crcforge.calculate("crc-16-modbus", b"123456789"), 0x4B37)
