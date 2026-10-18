@@ -2,7 +2,7 @@
 
 ## Data and checksums are different kinds of input
 
-CRCForge deliberately reads the payload (`original-data`) and the checksum differently. A payload like `123456789` is usually text; a checksum like `19255` is usually a number.
+CRCForge deliberately reads the payload (`data`) and the checksum differently. A payload like `123456789` is usually text; a checksum like `19255` is usually a number.
 
 ### Payload rules
 

@@ -43,10 +43,13 @@ Find out which algorithm produced a checksum:
 $ crcforge find 0x4B37 123456789
 CRC Match Search
 Checksum         0x4B37
-Original data    plain-text
+Data             plain-text, 9 bytes
 Byte-order scan  native
 Matches          1
-Match            [crc:as-given] crc-16-modbus: width=16, poly=0x8005, init=0xFFFF, refin=true, refout=true, xorout=0x0000
+
+  Algorithm      Type  Parameters
+  ─────────────  ────  ────────────────────────────────────────────────────────────
+  crc-16-modbus  CRC   poly=0x8005 init=0xFFFF refin=true refout=true xorout=0x0000
 ```
 
 Captured some frames but don't know where the checksum is or how it is computed? Hand over the frames:
@@ -54,10 +57,15 @@ Captured some frames but don't know where the checksum is or how it is computed?
 ```console
 $ crcforge solve --frames 010300000001840A 010300000002C40B 01030000000AC5CD 0106000100FF984A
 CRC Solver (frames)
-Frames           4 (lengths: 8 bytes)
+Frames           4 (length 8 bytes)
 Layouts tested   5
+
 Layout           16-bit checksum at the end, little-endian
-Catalog CRC      crc-16-modbus: width=16, poly=0x8005, init=0xFFFF, refin=true, refout=true, xorout=0x0000
+
+Catalog matches
+  Algorithm      Type  Parameters
+  ─────────────  ────  ────────────────────────────────────────────────────────────
+  crc-16-modbus  CRC   poly=0x8005 init=0xFFFF refin=true refout=true xorout=0x0000
 ```
 
 The checksum isn't from any catalog? `solve` derives the parameters. These four samples come from a made-up CRC:
@@ -67,9 +75,15 @@ $ crcforge solve PING:0x3197 PONG:0x16A1 PUSH:0x4524 STATUS:0x7CB4
 CRC Solver
 Samples          4 (lengths: 4, 6 bytes)
 Width            16 bits (inferred from 4 hex digits; pass --width to override)
-Derived CRC      width=16 poly=0x3d65 init=0x1234 refin=false refout=false xorout=0x0f0f
-                 or init=0xf917 xorout=0xe42c (equivalent)
-note: Some polynomials are divisible by (x+1); for those each init/xorout pair has equivalent twins that give identical CRCs for every message. All twins are listed and all are correct.
+
+Derived CRC parameters
+  Poly    Init    RefIn  RefOut  XorOut  Note
+  ──────  ──────  ─────  ──────  ──────  ───────────────────────────
+  0x3D65  0x1234  false  false   0x0F0F
+  0x3D65  0xF917  false  false   0xE42C  equivalent to the row above
+RevEng spec      width=16 poly=0x3d65 init=0x1234 refin=false refout=false xorout=0x0f0f
+
+note: Polynomials divisible by (x+1) have equivalent init/xorout pairs; all listed pairs are correct.
 ```
 
 Make data produce the CRC you want:
@@ -77,8 +91,8 @@ Make data produce the CRC you want:
 ```console
 $ crcforge forge crc-32 "hello world" 0xDEADBEEF
 Forge
-Algorithm        crc-32: width=32, poly=0x04C11DB7, init=0xFFFFFFFF, refin=true, refout=true, xorout=0xFFFFFFFF
-Original data    plain-text, 11 bytes
+Algorithm        crc-32  poly=0x04C11DB7 init=0xFFFFFFFF refin=true refout=true xorout=0xFFFFFFFF (32-bit)
+Data             plain-text, 11 bytes
 Target           0xDEADBEEF
 Patch            46 C9 6E 0B (inserted at offset 11)
 Forged data      68 65 6C 6C 6F 20 77 6F 72 6C 64 46 C9 6E 0B
@@ -102,7 +116,7 @@ Verified         0xDEADBEEF == target
 | `transform` | Apply a byte-order transform and print the bytes. |
 | `self-test` | Verify every catalog entry against its published check value and residue. |
 
-`crcforge <command> --help` shows every option with examples.
+`crcforge <command> -h` (or `crcforge help <command>`) shows every option with examples. Mistyped commands and options get a clear error with a suggestion instead of a usage dump.
 
 ## Reverse-engineering a checksum
 
@@ -124,7 +138,7 @@ Things worth knowing:
 
 ## Input rules
 
-CRCForge treats the payload (`original-data`) and the checksum as different kinds of input.
+CRCForge treats the payload (`data`) and the checksum as different kinds of input.
 
 | Payload | Meaning |
 | --- | --- |

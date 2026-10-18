@@ -22,8 +22,62 @@ class GeneralTest(unittest.TestCase):
     def test_no_arguments_prints_help(self) -> None:
         result = run_cli()
         self.assertEqual(result.code, 0)
-        self.assertIn("usage:", result.stdout.lower())
-        self.assertIn("Common tasks", result.stdout)
+        for heading in ("Usage", "Identify", "Calculate and check", "Modify and generate", "Catalog", "Examples"):
+            self.assertIn(heading, result.stdout)
+        self.assertNotIn("Exit codes", result.stdout)
+        self.assertEqual(run_cli("-h").stdout, result.stdout)
+        self.assertEqual(run_cli("help").stdout, result.stdout)
+
+    def test_friendly_errors_for_wrong_commands_and_options(self) -> None:
+        cases = {
+            ("slove", "x"): ("Unknown command 'slove'.", "Did you mean 'solve'?"),
+            ("find", "0x4B37"): ("crcforge find needs <data>.", "example: crcforge find 0x4B37 123456789"),
+            ("calc", "crc-32", "x", "--widht", "3"): ("Unknown option --widht for 'crcforge calc'.", "--width"),
+            ("find", "0x1", "x", "--byte-order", "swap128"): (
+                "'swap128' is not a valid value for --byte-order.",
+                "Choose one of: native, reverse, swap16, swap32, swap64.",
+            ),
+            ("list", "--width", "abc"): ("--width needs a whole number, not 'abc'.", "crcforge list -h"),
+            ("calc", "x", "--algorithm"): ("--algorithm needs a value.", "--algorithm NAME"),
+            ("find", "0x1", "x", "--s"): ("--s is ambiguous.", "--scan-byte-order"),
+            ("help", "nosuch"): ("Unknown command 'nosuch'.", "crcforge -h"),
+        }
+        for args, (error, hint) in cases.items():
+            with self.subTest(args):
+                result = run_cli(*args)
+                self.assertEqual(result.code, 2)
+                self.assertEqual(result.stdout, "")
+                self.assertIn(f"error: {error}", result.stderr)
+                self.assertIn(hint, result.stderr)
+                self.assertNotIn("Traceback", result.stderr)
+                self.assertNotIn("choose from", result.stderr)  # no raw argparse output
+
+    def test_missing_arguments_show_usage_and_example(self) -> None:
+        lines = run_cli("transform").stderr.splitlines()
+        self.assertEqual(lines[0], "error: crcforge transform needs <data>.")
+        self.assertTrue(lines[1].startswith("usage:   crcforge transform <data>"))
+        self.assertTrue(lines[2].startswith("example: crcforge transform "))
+        self.assertTrue(lines[3].startswith("hint:    Run 'crcforge transform -h'"))
+
+    def test_errors_in_json_mode(self) -> None:
+        result = run_cli("--json", "slove")
+        self.assertEqual(result.code, 2)
+        self.assertEqual(result.json()["error"], "Unknown command 'slove'.")
+        missing = run_cli("find", "0x1", "--json").json()
+        self.assertEqual(missing["usage"], "crcforge find <checksum> <data> [options]")
+        self.assertEqual(missing["example"], "crcforge find 0x4B37 123456789")
+
+    def test_help_command_and_command_help_layout(self) -> None:
+        result = run_cli("help", "solve")
+        self.assertEqual(result.code, 0)
+        self.assertEqual(result.stdout, run_cli("solve", "-h").stdout)
+        lines = result.stdout.splitlines()
+        self.assertTrue(lines[0].startswith("crcforge solve"))
+        for heading in ("Usage", "Arguments", "Options", "Frame layout", "Output options", "Examples"):
+            self.assertIn(heading, lines)
+        self.assertLess(lines.index("Frame layout"), lines.index("Output options"))  # shared options go last
+        self.assertIn("  --crc-at end|start|auto", result.stdout)
+        self.assertIn("Docs: https://kayranfatih.github.io/crcforge/commands/#solve", result.stdout)
 
     def test_version(self) -> None:
         result = run_cli("--version")
@@ -35,24 +89,15 @@ class GeneralTest(unittest.TestCase):
             with self.subTest(command):
                 result = run_cli(command, "--help")
                 self.assertEqual(result.code, 0)
-                self.assertIn("Examples:", result.stdout)
+                self.assertIn("\nExamples\n", result.stdout)
 
     def test_every_help_example_runs(self) -> None:
         """Examples shown in --help must keep working (files they mention are skipped)."""
         parser = build_parser()
-        texts = [parser.epilog or ""]
-        for action in parser._subparsers._group_actions:  # type: ignore[union-attr]
-            texts.extend(sub.epilog or "" for sub in action.choices.values())  # type: ignore[union-attr]
-        commands = []
-        for text in texts:
-            for line in text.splitlines():
-                stripped = line.strip()
-                if not stripped.startswith("crcforge "):
-                    continue
-                command = re.split(r"\s{2,}", stripped)[0]
-                if re.search(r"@|\.(bin|hex|s19|txt|c)\b", command):
-                    continue
-                commands.append(command)
+        examples = list(parser.examples)
+        for sub in parser.command_parsers.values():
+            examples.extend(sub.examples)
+        commands = [example for example in examples if not re.search(r"@|\.(bin|hex|s19|txt|c)\b", example)]
         self.assertGreater(len(commands), 25)
         original_directory = os.getcwd()
         with tempfile.TemporaryDirectory() as directory:
@@ -118,6 +163,118 @@ class GeneralTest(unittest.TestCase):
         self.assertFalse(supports_unicode(Stream("cp1252")))
         self.assertFalse(supports_unicode(Stream(None)))
         self.assertFalse(supports_unicode(Stream("no-such-codec")))
+
+
+class EdgeCaseTest(unittest.TestCase):
+    """Regressions found by manually running every command with odd and wrong input."""
+
+    def assert_error(self, args: tuple[str, ...], error: str, detail: str = "") -> None:
+        result = run_cli(*args)
+        self.assertEqual(result.code, 2, result.stderr)
+        self.assertTrue(result.stderr.startswith("error: "), result.stderr)
+        self.assertIn(error, result.stderr)
+        self.assertIn(detail, result.stderr)
+        self.assertNotIn("Traceback", result.stderr)
+
+    def test_positional_errors_show_usage_and_example(self) -> None:
+        cases = {
+            ("verify",): ("crcforge verify needs <algorithm> <data> <checksum>.", "example: crcforge verify "),
+            ("verify", "crc-16-modbus", "123"): ("crcforge verify needs <checksum>.", "add --frame"),
+            ("forge", "crc-32"): ("crcforge forge needs <data> <target>.", "usage:   crcforge forge <algorithm>"),
+            ("forge", "crc-32", "a", "b", "c"): ("Too many values", "Put quotes"),
+            ("codegen", "crc-32", "extra"): ("crcforge codegen takes one algorithm name", "crcforge codegen -h"),
+            ("-V",): ("Unknown option -V.", "Did you mean --version?"),
+        }
+        for args, (error, detail) in cases.items():
+            with self.subTest(args):
+                self.assert_error(args, error, detail)
+
+    def test_value_errors_name_the_option_and_the_fix(self) -> None:
+        cases = {
+            ("calc", "1", "--width", "16", "--poly", "0x18005"): (
+                "--poly 0x18005 does not fit in 16 bits.",
+                "without its top bit: 0x8005",
+            ),
+            ("calc", "1", "--width", "16", "--poly", "0x8005", "--xor-out", "-1"): ("--xor-out cannot be negative",),
+            ("brute", "1", "1", "--width", "16", "--poly", "0x8005", "--init", "5:1"): (
+                "--init range '5:1' is empty",
+                "Write it as 1:5.",
+            ),
+            ("verify", "crc-16-modbus", "123456789", "0x1FFFF"): ("does not fit in 16 bits.", "16-bit values"),
+            ("forge", "crc-32", "hello", "0x1", "--at", "99"): ("--at 99 is outside the data (5 bytes).",),
+            ("calc", "1", "--all", "--width", "999"): ("No catalog algorithms have a width of 999", "16, 17"),
+            ("solve", "abc:", "x:1"): ("Sample 'abc:' has no checksum after the ':'.",),
+            ("solve", "--frames", "PING:0x3197"): ("looks like a DATA:CHECKSUM sample.", "drop --frames"),
+            ("solve", "--frames", "010"): ("Frame '010': Hex input has an odd number of digits (3).", "@file"),
+        }
+        for args, (error, *detail) in cases.items():
+            with self.subTest(args):
+                self.assert_error(args, error, *detail)
+
+    def test_directories_are_rejected_politely(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            self.assert_error(("forge", "crc-32", "hi", "0x1", "-o", directory), "is a directory", "file name for -o")
+            self.assert_error(("codegen", "crc-32", "-o", directory), "is a directory", "file name for -o")
+            self.assert_error(("records", directory), "is a directory, not a file.")
+            self.assert_error(("calc", "crc-32", directory, "--as-file"), "is a directory, not a file.")
+
+    def test_compact_algorithm_names_resolve(self) -> None:
+        self.assertIn("crc-16-modbus:", run_cli("info", "crc16modbus", "-q").stdout)
+        self.assertEqual(run_cli("calc", "CRC16MODBUS", "123456789", "-q").stdout.strip(), "0x4B37")
+
+    def test_brute_with_a_polynomial_tries_conventional_init_and_xorout(self) -> None:
+        result = run_cli("brute", "0x4B37", "123456789", "--width", "16", "--poly", "0x8005", "--jobs", "1")
+        self.assertEqual(result.code, 0)
+        self.assertIn("init=2 values, xorout=2 values", result.stdout)
+        self.assertIn("init and xorout try 0 and all-ones", result.stdout)
+        self.assertIn("= crc-16-modbus", result.stdout)
+
+    def test_brute_limit_keeps_the_catalog_match_first(self) -> None:
+        result = run_cli(
+            "brute", "0x4B37", "123456789", "--full-custom", "--refin", "true", "--refout", "true", "--limit", "2"
+        )
+        rows = [line for line in result.stdout.splitlines() if line.startswith("  0x")]
+        self.assertTrue(rows[0].endswith("= crc-16-modbus"))
+        self.assertEqual(len(rows), 3)  # the catalog match plus --limit others
+        self.assertIn("Showing 3 of ", result.stdout)
+
+    def test_solve_without_a_match_explains_why_first(self) -> None:
+        lines = run_cli("solve", "0x0102:0x10", "0x0102:0x10", "--width", "8").stdout.splitlines()
+        failure = lines.index("No CRC or checksum fits every sample.")
+        self.assertEqual(lines[failure + 1], "note: Ignored 1 duplicate sample.")
+        self.assertIn("only one sample", lines[failure + 2])
+        self.assertNotIn("warning: Only one sample", "\n".join(lines))
+
+    def test_frames_show_only_the_best_layout(self) -> None:
+        result = run_cli("solve", "--frames", *MODBUS_FRAMES[:3], "--crc-at", "auto", "--skip", "auto")
+        self.assertEqual(result.code, 0)
+        self.assertIn("crc-16-modbus", result.stdout)
+        self.assertEqual(result.stdout.count("Layout           "), 1)
+        self.assertIn("other layouts also fit", result.stdout)
+        self.assertIn("same in every frame", result.stdout)
+        self.assertIn("16-bit checksum at the end, little-endian", result.stdout)
+
+    def test_verify_frame_mismatch_explains_both_byte_orders(self) -> None:
+        result = run_cli("verify", "crc-16-modbus", "0x010300000001840B", "--frame")
+        self.assertEqual(result.code, 1)
+        self.assertIn("Neither byte order of the stored checksum matches", result.stdout)
+
+    def test_algorithm_line_is_the_same_everywhere(self) -> None:
+        expected = "crc-16-modbus  poly=0x8005 init=0xFFFF refin=true refout=true xorout=0x0000 (16-bit)"
+        for args in (
+            ("calc", "crc-16-modbus", "123456789"),
+            ("verify", "crc-16-modbus", "123456789", "0x4B37"),
+            ("forge", "crc-16-modbus", "0x0103", "0x1234"),
+        ):
+            with self.subTest(args):
+                self.assertIn(f"Algorithm        {expected}", run_cli(*args).stdout)
+
+    def test_transform_of_nothing_says_empty(self) -> None:
+        self.assertIn("Result           (empty)", run_cli("transform", "").stdout)
+        self.assertIn(
+            "swap16 (reverse bytes inside each 16-bit word)",
+            run_cli("transform", "0x1122", "--byte-order", "swap16").stdout,
+        )
 
 
 class CalcTest(unittest.TestCase):
@@ -194,7 +351,10 @@ class CalcTest(unittest.TestCase):
         header = next(line for line in lines if " 16-bit " in line)
         self.assertTrue(header.startswith("-- 16-bit "))  # ASCII rule: the captured stream has no encoding
         self.assertTrue(header.endswith("31 CRCs, 8 checksums"))
-        group = lines[lines.index(header) + 1 : lines.index(header) + 40]
+        table_header, underline = lines[lines.index(header) + 1 : lines.index(header) + 3]
+        self.assertEqual(table_header.split(), ["Algorithm", "Type", "Hex", "Decimal"])
+        self.assertTrue(set(underline.strip()) <= {"-", " "})
+        group = lines[lines.index(header) + 3 : lines.index(header) + 42]
         self.assertTrue(group[0].split()[0].startswith("crc-16-"))  # CRCs first ...
         self.assertEqual(group[-1].split()[0], "xor-16")  # ... then checksums
         modbus = next(line for line in group if line.split()[0] == "crc-16-modbus")
@@ -234,7 +394,7 @@ class CalcTest(unittest.TestCase):
             ("calc", "123", "--width", "16"): "--poly",
             ("calc", "123", "--poly", "0x1021"): "--width",
             ("calc", "123", "--algorithm", "crc-32", "--poly", "0x1", "--width", "8"): "not both",
-            ("calc", "crc-32"): "Usage",
+            ("calc", "crc-32"): "crcforge calc needs <data>",
             ("calc", "123", "--width", "8", "--poly", "0x1FF"): "does not fit",
             ("calc", "123", "--all", "--algorithm", "crc-32"): "--all cannot",
         }
@@ -288,13 +448,15 @@ class BruteTest(unittest.TestCase):
     def test_catalog_mode(self) -> None:
         result = run_cli("brute", "0x4B37", "123456789", "--width", "16")
         self.assertEqual(result.code, 0)
-        self.assertIn("built-in-catalog", result.stdout)
-        self.assertIn("[input:native][crc:as-given] crc-16-modbus", result.stdout)
+        self.assertIn("built-in catalog", result.stdout)
+        row = next(line for line in result.stdout.splitlines() if line.split()[:1] == ["crc-16-modbus"])
+        self.assertEqual(row.split()[1:3], ["CRC", "native"])
 
     def test_little_endian_word_checksum(self) -> None:
         result = run_cli("brute", "0xB861", "0x004573000000004011400000A8C00100A8C0C700", "--width", "16")
         self.assertEqual(result.code, 0)
-        self.assertIn("[input:swap16][crc:as-given] ones-complement-16", result.stdout)
+        rows = [line.split() for line in result.stdout.splitlines() if line.split()[:1] == ["ones-complement-16"]]
+        self.assertTrue(any("swap16" in row and "as" in row and "given" in row for row in rows), rows)
 
     def test_custom_mode_solves_xorout(self) -> None:
         result = run_cli(
@@ -315,11 +477,12 @@ class BruteTest(unittest.TestCase):
             "1",
         )
         self.assertEqual(result.code, 0)
-        self.assertIn("init=solved directly", result.stdout)
-        self.assertIn("(= crc-16-modbus)", result.stdout)
+        self.assertIn("init=65,536 values, xorout=2 values", result.stdout)
+        self.assertIn("= crc-16-modbus", result.stdout)
         narrow = run_cli("brute", "0x4B37", "123456789", "--width", "16", "--poly", "0x8000:0x80FF", "--init", "0xFFFF")
-        self.assertIn("xorout=solved directly", narrow.stdout)
-        self.assertIn("(= crc-16-modbus)", narrow.stdout)
+        self.assertIn("init=1 value, xorout=2 values", narrow.stdout)
+        self.assertIn("xorout tries 0 and all-ones", narrow.stdout)
+        self.assertIn("= crc-16-modbus", narrow.stdout)
 
     def test_full_custom_explains_conventional_limits_and_coincidences(self) -> None:
         result = run_cli(
@@ -328,10 +491,12 @@ class BruteTest(unittest.TestCase):
         self.assertEqual(result.code, 0)
         self.assertIn("inferred from the decimal value", result.stdout)
         self.assertIn("limited to 0 and all-ones", result.stdout)
-        self.assertIn("coincidental", result.stdout)
-        self.assertIn("poly=0x8005", result.stdout)
-        first_match = next(line for line in result.stdout.splitlines() if line.startswith("Match "))
-        self.assertIn("crc-16-modbus", first_match)
+        self.assertIn("expected by chance", result.stdout)
+        lines = result.stdout.splitlines()
+        header = next(index for index, line in enumerate(lines) if line.split()[:2] == ["Input", "Checksum"])
+        first_match = lines[header + 2]  # after the header and its underline
+        self.assertIn("0x8005", first_match)
+        self.assertIn("= crc-16-modbus", first_match)
 
     def test_quiet_and_json(self) -> None:
         args = (
@@ -380,7 +545,7 @@ class SolveTest(unittest.TestCase):
         ]
         result = run_cli("solve", *samples)
         self.assertEqual(result.code, 0, result)
-        self.assertIn("Catalog CRC", result.stdout)
+        self.assertIn("Catalog matches", result.stdout)
         self.assertIn("crc-16-modbus", result.stdout)
         self.assertEqual(run_cli("solve", *samples, "-q").stdout.split()[0], "crc-16-modbus")
         data = run_cli("solve", *samples, "--json").json()
@@ -559,7 +724,8 @@ class CatalogCommandsTest(unittest.TestCase):
 
     def test_self_test(self) -> None:
         human = run_cli("self-test")
-        self.assertIn("134 algorithms", human.stdout)
+        self.assertIn("PASSED", human.stdout)
+        self.assertIn("134 (113 CRCs, 21 checksums)", human.stdout)
         self.assertEqual(run_cli("self-test", "-q").stdout.strip(), "passed")
         self.assertTrue(run_cli("self-test", "--json").json()["passed"])
 

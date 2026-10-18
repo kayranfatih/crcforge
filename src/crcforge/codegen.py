@@ -93,7 +93,10 @@ def _python(algorithm: CrcAlgorithm, name: str) -> str:
         f"    crc = 0x{_start_register(algorithm):0{digits}X}",
         "    for byte in data:",
     ]
-    if algorithm.refin:
+    if register_bits <= 8:
+        # One-byte register: the table lookup alone is the whole update.
+        lines.append("        crc = table[crc ^ byte]")
+    elif algorithm.refin:
         lines.append("        crc = table[(crc ^ byte) & 0xFF] ^ (crc >> 8)")
     else:
         mask = (1 << register_bits) - 1

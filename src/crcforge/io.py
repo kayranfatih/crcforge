@@ -112,26 +112,33 @@ def parse_value_spec(raw_value: str, mask: int, label: str) -> list[int]:
             end = parse_number(bounds[1], label)
             step = parse_number(bounds[2], label) if len(bounds) == 3 else 1
             if step <= 0:
-                raise InputError(f"{label} range step must be positive.")
+                raise InputError(f"--{label} range '{token}' needs a positive step.")
             if start > end:
-                raise InputError(f"{label} range start must be <= end.")
+                raise InputError(
+                    f"--{label} range '{token}' is empty: the start is above the end.",
+                    hint=f"Write it as {bounds[1]}:{bounds[0]}" + (f":{bounds[2]}" if len(bounds) == 3 else "") + ".",
+                )
             candidates: range | list[int] = range(start, end + 1, step)
         else:
             candidates = [parse_number(token, label)]
 
         for value in candidates:
-            if value < 0 or value > mask:
+            if value < 0:
+                raise InputError(f"--{label} cannot be negative ({token}).")
+            if value > mask:
+                hint = "Check --width, or the value's number of digits."
+                if label == "poly" and value.bit_length() == width + 1:
+                    hint = f"Write the polynomial without its top bit: {format_value(value & mask, width)}."
                 raise InputError(
-                    f"{label} value {format_value(value, max(width, value.bit_length()))} does not fit in "
-                    f"{width} bits.",
-                    hint="Check --width, or the value's number of digits.",
+                    f"--{label} {format_value(value, max(width, value.bit_length()))} does not fit in {width} bits.",
+                    hint=hint,
                 )
             if value not in seen:
                 values.append(value)
                 seen.add(value)
 
     if not values:
-        raise InputError(f"{label} specification is empty.")
+        raise InputError(f"--{label} is empty.", hint="Give a value, a comma list or a START:END range.")
     return values
 
 
@@ -183,6 +190,8 @@ def is_binary_literal(raw_value: str) -> bool:
 
 
 def read_file_bytes(path: str) -> bytes:
+    if Path(path).is_dir():
+        raise InputError(f"{path} is a directory, not a file.")
     try:
         return Path(path).read_bytes()
     except FileNotFoundError:
@@ -191,6 +200,8 @@ def read_file_bytes(path: str) -> bytes:
         raise InputError(f"{path} is a directory, not a file.") from None
     except PermissionError:
         raise InputError(f"Permission denied: {path}") from None
+    except OSError as error:
+        raise InputError(f"Cannot read {path}: {error.strerror or error}.") from None
 
 
 def parse_data_literal(raw_value: str, as_file: bool = False, as_text: bool = False) -> bytes:
@@ -291,6 +302,13 @@ def parse_sample(raw_value: str) -> tuple[bytes, ParsedChecksum]:
             hint="Write samples as DATA:CHECKSUM, for example 0x313233:0x7A75 or hello:0x34F6.",
         )
     data_text, checksum_text = raw_value.rsplit(":", 1)
+    if not checksum_text.strip():
+        raise InputError(
+            f"Sample '{raw_value}' has no checksum after the ':'.",
+            hint="Write samples as DATA:CHECKSUM, for example 0x313233:0x7A75 or hello:0x34F6.",
+        )
+    if not data_text:
+        raise InputError(f"Sample '{raw_value}' has no data before the ':'.", hint="Write samples as DATA:CHECKSUM.")
     data = read_file_bytes(data_text[1:]) if data_text.startswith("@") else parse_data_literal(data_text)
     return data, parse_checksum_value(checksum_text)
 
@@ -300,9 +318,20 @@ def parse_frame(raw_value: str) -> bytes:
     if raw_value.startswith("@"):
         return read_file_bytes(raw_value[1:])
     text = normalize_literal(raw_value)
-    if text.lower().startswith("0b"):
-        return parse_binary_bytes(text)
-    return parse_hex_bytes(text)
+    if ":" in text:
+        raise InputError(
+            f"Frame '{raw_value}' looks like a DATA:CHECKSUM sample.",
+            hint="--frames takes whole hex frames with the checksum inside; drop --frames for DATA:CHECKSUM samples.",
+        )
+    try:
+        if text.lower().startswith("0b"):
+            return parse_binary_bytes(text)
+        return parse_hex_bytes(text)
+    except InputError as error:
+        raise InputError(
+            f"Frame '{raw_value}': {error}",
+            hint="Frames are hex bytes (two digits per byte, 0x optional) or @file for a binary file.",
+        ) from None
 
 
 def read_lines(path: str) -> list[str]:

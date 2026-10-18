@@ -78,7 +78,7 @@ class SolveResult:
 
 def swap_value_bytes(value: int, width: int) -> int | None:
     """Byte-swap a checksum value; None when it has a single byte or no whole-byte width."""
-    if width <= 8 or width % 8 != 0:
+    if width <= 8 or width % 8 != 0 or value >> width:
         return None
     byte_length = width // 8
     return int.from_bytes(value.to_bytes(byte_length, "big"), "little")
@@ -255,8 +255,9 @@ def derive_polys(
         return None
     top = 1 << width
     if gf2.degree(common) == width:
-        return [common ^ top], False
-    factors = gf2.small_factors(common, width)
+        # Real CRC polynomials have the +1 term; even ones are degenerate shift registers.
+        return ([common ^ top] if common & 1 else []), False
+    factors = [(factor, count) for factor, count in gf2.small_factors(common, width) if factor != 0b10]
     divisors = list(gf2.divisors_of_degree(factors, width, limit + 1))
     truncated = len(divisors) > limit
     return sorted({divisor ^ top for divisor in divisors[:limit]}), truncated
@@ -269,12 +270,16 @@ def _catalog_key(algorithm: CrcAlgorithm) -> tuple[int, int, int, int, bool, boo
 _CRC_BY_PARAMS: dict[tuple[int, int, int, int, bool, bool], CrcAlgorithm] = {}
 
 
-def catalog_name_for(algorithm: CrcAlgorithm) -> str | None:
+def _catalog_by_params() -> dict[tuple[int, int, int, int, bool, bool], CrcAlgorithm]:
     if not _CRC_BY_PARAMS:
         for entry in get_algorithms(family="crc"):
             if isinstance(entry, CrcAlgorithm):
                 _CRC_BY_PARAMS.setdefault(_catalog_key(entry), entry)
-    known = _CRC_BY_PARAMS.get(_catalog_key(algorithm))
+    return _CRC_BY_PARAMS
+
+
+def catalog_name_for(algorithm: CrcAlgorithm) -> str | None:
+    known = _catalog_by_params().get(_catalog_key(algorithm))
     return known.name if known else None
 
 
@@ -339,8 +344,23 @@ def solve(
         if sample.checksum > mask:
             raise ValueError(f"Checksum 0x{sample.checksum:X} does not fit in {width} bits. Pass a larger --width.")
 
+    unique: list[Sample] = []
+    for sample in samples:
+        if sample not in unique:
+            unique.append(sample)
+    duplicates = len(samples) - len(unique)
+    samples = unique
     lengths = tuple(sorted({len(sample.data) for sample in samples}))
     result = SolveResult(width=width, sample_count=len(samples), lengths=lengths)
+    if duplicates:
+        _note_once(result, f"Ignored {duplicates} duplicate sample{'s' if duplicates != 1 else ''}.")
+    by_data: dict[bytes, int] = {}
+    for sample in samples:
+        if by_data.setdefault(sample.data, sample.checksum) != sample.checksum:
+            _note_once(
+                result,
+                "Two samples have the same data but different checksums.",
+            )
     seen_crcs: set[tuple[object, ...]] = set()
     seen_catalog: set[tuple[str, str, str]] = set()
     prepared: list[tuple[str, str, list[Sample]]] = []
@@ -423,25 +443,15 @@ def _solve_crc(
             if solutions.free_bits and len({len(s.data) for s in samples}) > 1 and solutions.free_bits <= multiplicity:
                 _note_once(
                     result,
-                    "Some polynomials are divisible by (x+1); for those each init/xorout pair has equivalent twins "
-                    "that give identical CRCs for every message. All twins are listed and all are correct.",
+                    "Polynomials divisible by (x+1) have equivalent init/xorout pairs; all listed pairs are correct.",
                     derived=True,
                 )
             elif solutions.free_bits:
                 if len({len(sample.data) for sample in samples}) == 1:
-                    reason = "every sample has the same length"
-                    advice = "add a sample of a different length to pin them down"
+                    advice = "add a sample of another length to pin them down"
                 else:
-                    reason = "the samples' lengths are too close together for this polynomial"
                     advice = "add samples whose lengths differ more"
-                _note_once(
-                    result,
-                    f"For some solutions init and xorout are not fully determined because {reason}: several "
-                    "init/xorout pairs give identical results. Equivalent pairs are listed when there are few, "
-                    "otherwise the conventional init values (0 and all-ones) or one representative. "
-                    f"To fix them, {advice}.",
-                    derived=True,
-                )
+                _note_once(result, f"init and xorout are not unique for some solutions; {advice}.", derived=True)
             for init, xorout in solutions.pairs:
                 if not _record(
                     result,
@@ -459,14 +469,13 @@ def _solve_crc(
     if scan_limit == 0 and poly_values is None:
         _note_once(
             result,
-            "A catalog algorithm already fits, so the slower polynomial scan was skipped "
-            "(use --all-solutions to run it anyway).",
+            "A catalog algorithm fits, so the polynomial scan was skipped (--all-solutions runs it).",
         )
         return
     if poly_values is not None:
         scan_polys: Sequence[int] = list(poly_values)
     elif width <= 16 and (1 << width) <= scan_limit:
-        scan_polys = range(1 << width)
+        scan_polys = range(1, 1 << width, 2)  # odd polynomials only
     else:
         _note_once(
             result,
@@ -482,16 +491,12 @@ def _solve_crc(
         len(samples),
     )
     if chance > 0.5:
-        _note_once(
-            result,
-            "These samples cannot single out a CRC: no two share a length, and with init and xorout free "
-            "almost every polynomial fits. Add samples (ideally two of equal length) or fix --init/--xor-out.",
-        )
+        reason = "only one sample" if len(samples) == 1 else "no two have the same length"
+        _note_once(result, f"Not enough samples to find a CRC ({reason}). Add samples, ideally two of the same length.")
         return
     _note_once(
         result,
-        f"No two samples share a length, so {len(scan_polys)} polynomials were scanned. "
-        "Equal-length samples make this instant.",
+        f"No two samples have the same length, so {len(scan_polys)} polynomials were scanned.",
     )
     scan = scan_custom(
         [(mode, crc_mode, tuple(samples))],
@@ -601,6 +606,7 @@ def _scan_chunk(
     found: list[ScanHit] = []
     count = 0
     tested = 0
+    catalog = _catalog_by_params()
     for input_mode, crc_mode, samples in views:
         for poly in polys:
             for refin, refout in reflections:
@@ -612,7 +618,8 @@ def _scan_chunk(
                     continue
                 count += len(solutions.pairs)
                 for init, xorout in solutions.pairs:
-                    if len(found) < keep:
+                    # Catalog algorithms are always kept so coincidental fits cannot crowd them out.
+                    if len(found) < keep or (width, poly, init, xorout, refin, refout) in catalog:
                         found.append((input_mode, crc_mode, poly, init, xorout, refin, refout, solutions.free_bits))
     return found, count, tested
 
@@ -643,10 +650,10 @@ def scan_custom(
         result.match_count += count
         result.tested += tested
         for input_mode, crc_mode, poly, init, xorout, refin, refout, free_bits in found:
-            if len(result.matches) >= keep:
-                break
             algorithm = CrcAlgorithm("custom", width, poly, init, xorout, refin, refout)
             result.matches.append(CrcMatch(algorithm, input_mode, crc_mode, catalog_name_for(algorithm), free_bits))
+        if len(result.matches) > 4 * keep:
+            _sort_matches(result, views, keep)
         if progress is not None:
             progress(result.tested, total)
 
@@ -656,7 +663,7 @@ def scan_custom(
                 absorb(*_scan_chunk(views, width, chunk, reflections, init_values, xorout_values, keep))
         except KeyboardInterrupt:
             result.interrupted = True
-        _sort_matches(result, views)
+        _sort_matches(result, views, keep)
         return result
 
     executor = ProcessPoolExecutor(max_workers=jobs)
@@ -673,15 +680,18 @@ def scan_custom(
     except KeyboardInterrupt:
         result.interrupted = True
         executor.shutdown(wait=False, cancel_futures=True)
-        _sort_matches(result, views)
+        _sort_matches(result, views, keep)
         return result
     executor.shutdown()
-    _sort_matches(result, views)
+    _sort_matches(result, views, keep)
     return result
 
 
-def _sort_matches(result: ScanResult, views: Sequence[ScanView]) -> None:
-    """Deterministic order regardless of worker timing: catalog matches first, then by view and poly."""
+def _sort_matches(result: ScanResult, views: Sequence[ScanView], keep: int) -> None:
+    """Deterministic order regardless of worker timing: catalog matches first, then by view and poly.
+
+    Every catalog match is kept; at most ``keep`` other matches follow them.
+    """
     order = {(view[0], view[1]): index for index, view in enumerate(views)}
     result.matches.sort(
         key=lambda m: (
@@ -694,6 +704,8 @@ def _sort_matches(result: ScanResult, views: Sequence[ScanView]) -> None:
             m.algorithm.xor_out,
         )
     )
+    catalog_count = sum(1 for match in result.matches if match.catalog_name is not None)
+    del result.matches[catalog_count + keep :]
 
 
 def default_jobs(work: int) -> int:

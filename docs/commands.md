@@ -1,6 +1,6 @@
 # Command reference
 
-Every command accepts the output options below, before or after the command name, and `--help` for the full option list with examples.
+Every command accepts the output options below, before or after the command name, and `-h` for the full option list with examples (`crcforge help <command>` works too).
 
 | Option | Effect |
 | --- | --- |
@@ -100,7 +100,7 @@ Value specs: `0x1021`, lists `0x1021,0x8005`, inclusive ranges `0x1000:0x10FF` o
 | Option | Effect |
 | --- | --- |
 | `--width BITS` | CRC width (inferred from the checksum with `--full-custom`) |
-| `--poly`, `--init`, `--xor-out` | value specs; init and xorout default to 0 |
+| `--poly`, `--init`, `--xor-out` | value specs; a missing init or xorout tries 0 and all-ones |
 | `--refin`, `--refout` | `true`, `false` or `auto` (default) |
 | `--full-custom` | every polynomial, init and xorout free (widths up to 16; with one sample init/xorout are limited to 0 and all-ones) |
 | `--algorithm`, `--family` | catalog mode filters |

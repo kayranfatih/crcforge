@@ -53,7 +53,8 @@ def forge(
 ) -> ForgeResult:
     """Return data with a patch inserted (default: appended) or overwritten so it hits ``target``."""
     if target < 0 or target > algorithm.mask:
-        raise ForgeError(f"Target {target:#x} does not fit in {algorithm.width} bits.")
+        shown = format_value(target, max(algorithm.width, target.bit_length()))
+        raise ForgeError(f"Target {shown} does not fit in {algorithm.width} bits ({algorithm.name}).")
     if offset is None:
         offset = len(data) - (patch_size or 0) if overwrite else len(data)
     if isinstance(algorithm, CrcAlgorithm):
@@ -168,9 +169,8 @@ def _forge_sum(
             needed = needed_for(words)
     if fixed_words is None and words > MAX_SUM_PATCH_WORDS:
         raise ForgeError(
-            f"Reaching {format_value(target, width)} with {algorithm.name} would need a {words * word_size}-byte "
-            f"patch: each {word_size * 8}-bit word adds at most {word_max:#x} to a {width}-bit sum. "
-            "Pick a target closer to the current checksum or a checksum with wider words."
+            f"Reaching {format_value(target, width)} with {algorithm.name} would need a {words * word_size:,}-byte "
+            "patch. Pick a target closer to the current checksum."
         )
     if needed > words * word_max:
         raise ForgeError(f"A {words}-word patch cannot add {needed:#x}; pass a larger --patch-size or omit it.")

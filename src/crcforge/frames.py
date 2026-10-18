@@ -31,7 +31,7 @@ class FrameLayout:
         size = self.checksum_bytes
         if len(frame) < size + self.skip:
             raise ValueError(
-                f"Frame of {len(frame)} bytes is too short for a {size}-byte checksum"
+                f"Frame of {len(frame)} byte{'s' if len(frame) != 1 else ''} is too short for a {size}-byte checksum"
                 + (f" and {self.skip} skipped bytes." if self.skip else ".")
             )
         if self.position == "end":

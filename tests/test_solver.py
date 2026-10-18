@@ -105,7 +105,7 @@ class SolveTest(unittest.TestCase):
         result = solve(samples, 32, swap_checksums=False)
         self.assertEqual([m.algorithm.name for m in result.catalog_matches], ["crc-32"])
         self.assertTrue(any(m.algorithm.poly == 0x04C11DB7 and m.free_bits for m in result.crc_matches))
-        self.assertTrue(any("same length" in note for note in result.derived_notes))
+        self.assertTrue(any("not unique" in note for note in result.derived_notes))
         self.assert_sound(result.crc_matches, samples)
 
     def test_two_equal_length_samples_use_factorization(self) -> None:
@@ -143,7 +143,7 @@ class SolveTest(unittest.TestCase):
         samples = samples_for(secret, [rng.randbytes(5), rng.randbytes(9)])
         result = solve(samples, 16, swap_checksums=False, reflections=[(True, True)])
         self.assertEqual(result.crc_matches, [])
-        self.assertTrue(any("cannot single out" in note for note in result.notes))
+        self.assertTrue(any("Not enough samples" in note for note in result.notes))
 
     def test_wide_crc_without_equal_lengths_asks_for_more_samples(self) -> None:
         rng = random.Random(6)
@@ -194,6 +194,14 @@ class SolveTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             solve([Sample(b"x", 1)], 0)
 
+    def test_duplicate_samples_are_ignored_and_explained(self) -> None:
+        result = solve([Sample(b"\x01\x02", 0x10), Sample(b"\x01\x02", 0x10)], 8)
+        self.assertEqual(result.sample_count, 1)
+        self.assertIn("Ignored 1 duplicate sample.", result.notes)
+        self.assertTrue(any("only one sample" in note for note in result.notes))
+        conflicting = solve([Sample(b"\x01\x02", 0x10), Sample(b"\x01\x02", 0x11)], 8)
+        self.assertFalse(conflicting.found)
+
 
 class InitXorTest(unittest.TestCase):
     def test_constraints_select_the_matching_pair(self) -> None:
@@ -218,6 +226,19 @@ class DerivePolysTest(unittest.TestCase):
 
     def test_identical_samples_carry_no_information(self) -> None:
         self.assertIsNone(derive_polys([Sample(b"ab", 1), Sample(b"ab", 1)], 16, False, False))
+
+    def test_derived_polynomials_are_odd(self) -> None:
+        """Even polynomials (an x factor) are degenerate and only add noise to the answers."""
+        rng = random.Random(21)
+        for width in (8, 12, 16):
+            secret = random_crc(rng, width)
+            samples = samples_for(secret, [rng.randbytes(5) for _ in range(3)])
+            derived = derive_polys(samples, width, secret.refin, secret.refout)
+            with self.subTest(width=width):
+                self.assertIsNotNone(derived)
+                assert derived is not None
+                self.assertIn(secret.poly, derived[0])
+                self.assertTrue(all(poly & 1 for poly in derived[0]))
 
 
 class ScanCustomTest(unittest.TestCase):
@@ -290,6 +311,16 @@ class ScanCustomTest(unittest.TestCase):
         self.assertEqual(len(result.matches), 3)
         self.assertGreater(result.match_count, 3)
         self.assertEqual(result.tested, 256 * 4)
+
+    def test_keep_never_drops_catalog_matches(self) -> None:
+        """Coincidental fits with smaller polynomials must not crowd out a catalog algorithm."""
+        views = [("native", "as-given", (Sample(b"123456789", 0xBC),))]  # crc-8-dvb-s2, poly 0xD5
+        for jobs in (1, 2):
+            result = scan_custom(views, 8, range(1, 256, 2), REFLECTION_COMBOS, [0, 0xFF], [0, 0xFF], keep=1, jobs=jobs)
+            with self.subTest(jobs=jobs):
+                self.assertEqual(result.matches[0].catalog_name, "crc-8-dvb-s2")
+                self.assertLessEqual(sum(1 for match in result.matches if match.catalog_name is None), 1)
+                self.assertGreater(result.match_count, len(result.matches))
 
 
 class HelpersTest(unittest.TestCase):

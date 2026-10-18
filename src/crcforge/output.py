@@ -4,8 +4,11 @@ from __future__ import annotations
 
 import json
 import os
+import re
+import shutil
 import sys
 import time
+from collections.abc import Sequence
 from typing import IO, Any
 
 ANSI_RESET = "\033[0m"
@@ -57,6 +60,23 @@ def supports_unicode(stream: object | None = None) -> bool:
     return True
 
 
+_ANSI_ESCAPE = re.compile(r"\x1b\[[0-9;]*m")
+
+
+def visible_len(text: str) -> int:
+    """Length as shown on screen, ignoring color codes."""
+    return len(_ANSI_ESCAPE.sub("", text))
+
+
+def pad_visible(text: str, width: int, align: str = "<") -> str:
+    padding = " " * max(0, width - visible_len(text))
+    return padding + text if align == ">" else text + padding
+
+
+def terminal_width(default: int = 100) -> int:
+    return max(60, min(shutil.get_terminal_size((default, 24)).columns, 140))
+
+
 def colorize(text: str, ansi_code: str, enabled: bool) -> str:
     return f"{ansi_code}{text}{ANSI_RESET}" if enabled else text
 
@@ -101,6 +121,32 @@ class Output:
     def style(self, text: str, status: str) -> str:
         """Color a fragment for composing custom lines (no-op without color)."""
         return self._style(text, status)
+
+    def table(
+        self,
+        headers: Sequence[str],
+        rows: Sequence[Sequence[str]],
+        align: str = "",
+        indent: int = 2,
+    ) -> None:
+        """An aligned table with a header row and an underline. Cells may already carry colors."""
+        if not self.human or not rows:
+            return
+        widths = [
+            max(visible_len(header), *(visible_len(row[index]) for row in rows)) for index, header in enumerate(headers)
+        ]
+        alignment = align.ljust(len(headers), "<")
+        prefix = " " * indent
+        dash = "─" if self.unicode else "-"
+
+        def render(cells: Sequence[str]) -> str:
+            parts = [pad_visible(cell, width, side) for cell, width, side in zip(cells, widths, alignment, strict=True)]
+            return (prefix + "  ".join(parts)).rstrip()
+
+        self.line(render([self._style(header, "frame") for header in headers]))
+        self.line(prefix + "  ".join(self._style(dash * width, "dim") for width in widths))
+        for row in rows:
+            self.line(render(row))
 
     def rule(self, title: str, detail: str = "", width: int = 72) -> None:
         """A group heading such as ``── 16-bit ────────── 31 CRCs, 8 checksums``."""

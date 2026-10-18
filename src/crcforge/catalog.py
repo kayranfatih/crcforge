@@ -50,11 +50,24 @@ def _build_lookup() -> dict[str, Algorithm]:
 ALGORITHMS_BY_NAME = _build_lookup()
 
 
+def _build_compact_lookup() -> dict[str, Algorithm]:
+    """Names with every separator removed ("crc16modbus"), kept only when unambiguous."""
+    compact: dict[str, Algorithm | None] = {}
+    for name, algorithm in ALGORITHMS_BY_NAME.items():
+        key = name.replace("-", "")
+        existing = compact.get(key, algorithm)
+        compact[key] = algorithm if existing is algorithm else None
+    return {key: algorithm for key, algorithm in compact.items() if algorithm is not None}
+
+
+COMPACT_NAMES = _build_compact_lookup()
+
+
 def suggest_names(name: str, limit: int = 3) -> list[str]:
     normalized = normalize_name(name)
     matches = difflib.get_close_matches(normalized, ALGORITHMS_BY_NAME, n=limit * 3, cutoff=0.6)
-    if not matches:
-        matches = [candidate for candidate in ALGORITHMS_BY_NAME if normalized and normalized in candidate]
+    if not matches and len(normalized) >= 3:
+        matches = [candidate for candidate in ALGORITHMS_BY_NAME if normalized in candidate]
     primary: list[str] = []
     for match in matches:
         algorithm_name = ALGORITHMS_BY_NAME[match].name
@@ -65,10 +78,11 @@ def suggest_names(name: str, limit: int = 3) -> list[str]:
 
 def get_algorithm(name: str) -> Algorithm:
     """Look up a built-in algorithm by name or alias (case and separators are ignored)."""
-    try:
-        return ALGORITHMS_BY_NAME[normalize_name(name)]
-    except KeyError:
-        raise UnknownAlgorithmError(name, suggest_names(name)) from None
+    normalized = normalize_name(name)
+    algorithm = ALGORITHMS_BY_NAME.get(normalized) or COMPACT_NAMES.get(normalized.replace("-", ""))
+    if algorithm is None:
+        raise UnknownAlgorithmError(name, suggest_names(name))
+    return algorithm
 
 
 def get_algorithms(

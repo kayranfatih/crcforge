@@ -8,12 +8,21 @@ All notable changes to CRCForge are documented here. The format follows
 
 ### Added
 
-- A note when plain-text input looks like hex (for example `010300000001`), showing the `0x` form that reads it as bytes.
+- `crcforge help <command>`.
+- Algorithm names work without separators (`crc16modbus`).
 
 ### Changed
 
-- `calc --all` prints a table grouped by width, CRCs first and then checksums, with a type column (CRC, sum, one's/two's complement, XOR, Fletcher, ...) and colors.
-- New banner: gradient block letters with a tagline and the version. Terminals and files that cannot show those characters get the previous ASCII banner.
+- New help screens and clearer error messages.
+- Results are shown as tables, `calc --all` is grouped by width.
+- New banner.
+- `brute --poly` tries 0 and all-ones for init/xorout when they are not given.
+- `solve --frames` shows only the most likely layout.
+
+### Fixed
+
+- `brute --limit` could hide a catalog match.
+- Crashes on an oversized `verify` checksum and on directories passed as files.
 
 ## [1.1.0] - 2026-10-18
 

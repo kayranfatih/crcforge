@@ -5,8 +5,8 @@
 ```console
 $ crcforge forge crc-32 "hello world" 0xDEADBEEF
 Forge
-Algorithm        crc-32: width=32, poly=0x04C11DB7, init=0xFFFFFFFF, refin=true, refout=true, xorout=0xFFFFFFFF
-Original data    plain-text, 11 bytes
+Algorithm        crc-32  poly=0x04C11DB7 init=0xFFFFFFFF refin=true refout=true xorout=0xFFFFFFFF (32-bit)
+Data             plain-text, 11 bytes
 Target           0xDEADBEEF
 Patch            46 C9 6E 0B (inserted at offset 11)
 Forged data      68 65 6C 6C 6F 20 77 6F 72 6C 64 46 C9 6E 0B
