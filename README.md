@@ -5,39 +5,37 @@
 ![Dependencies: none](https://img.shields.io/badge/dependencies-none-brightgreen)
 [![License: Apache 2.0](https://img.shields.io/badge/license-Apache%202.0-blue)](https://github.com/kayranfatih/crcforge/blob/main/LICENSE)
 
-**CRCForge** is a Swiss Army knife for CRCs and checksums, built for reverse engineers, protocol analysts and firmware researchers. Give it data and a checksum and it tells you which algorithm produced it. When no known algorithm fits, it **derives the CRC parameters from your samples**. It also forges data to hit a chosen CRC, validates Intel HEX and S-record files, and generates C, Python or Rust implementations.
+**CRCForge** is a Swiss Army knife for CRCs and checksums, built for reverse engineers, protocol analysts and firmware researchers. Give it some data and its checksum and it checks 134 known algorithms. If none of them match, it can work out the CRC parameters from a few samples. It can also patch data to get the CRC you want, check Intel HEX and S-record files and generate CRC code in C, Python or Rust.
 
-- **134 built-in algorithms**: the complete [RevEng CRC catalogue](https://reveng.sourceforge.io/crc-catalogue/all.htm) (113 CRCs, each verified against its check value and residue) plus sum, one's/two's complement, XOR, Fletcher, Adler-32, BSD and SysV checksums.
-- **Parameter solver**: derives poly, init, xorout, refin and refout from a handful of samples, for any width including 32- and 64-bit CRCs, typically in well under a second.
-- **Frame analysis**: finds where the checksum sits in captured frames, how wide it is and which byte order it uses.
-- **Byte-order aware**: also tries reversed and word-swapped payloads and byte-swapped checksums.
-- **Forge**: insert or overwrite bytes so data produces any CRC or sum/XOR checksum you choose.
-- **Scriptable**: `--json` and `--quiet` on every command, meaningful exit codes, a Python API, and no dependencies.
+- 134 algorithms: all 113 CRCs from the [RevEng catalogue](https://reveng.sourceforge.io/crc-catalogue/all.htm) plus sum, one's and two's complement, XOR, Fletcher, Adler-32, BSD and SysV checksums
+- Works out poly, init, xorout and reflection from samples, 32 and 64-bit CRCs included
+- Finds the checksum inside captured frames: where it is, how wide it is and its byte order
+- Also tries reversed or byte-swapped data and checksums
+- Patches data so it produces a chosen CRC or checksum
+- `--json` and `-q` on every command, a Python API and no dependencies
 
-## Installation
+## Install
 
 ```bash
 pipx install crcforge
 ```
 
-`python -m pip install crcforge` works too. To install the latest code from GitHub:
+`pip install crcforge` works too. CRCForge needs Python 3.10 or newer. For the latest code:
 
 ```bash
 pipx install git+https://github.com/kayranfatih/crcforge
 ```
 
-CRCForge needs Python 3.10 or newer and has no third-party dependencies. In a source checkout, `python crcforge.py` runs it without installing.
-
 ## Quick start
 
-Calculate a known CRC:
+Calculate a CRC:
 
 ```console
 $ crcforge calc crc-16-modbus 123456789 -q
 0x4B37
 ```
 
-Find out which algorithm produced a checksum:
+Find which algorithm made a checksum:
 
 ```console
 $ crcforge find 0x4B37 123456789
@@ -52,23 +50,22 @@ Matches          1
   crc-16-modbus  CRC   poly=0x8005 init=0xFFFF refin=true refout=true xorout=0x0000
 ```
 
-Captured some frames but don't know where the checksum is or how it is computed? Hand over the frames:
+Patch data so its CRC becomes `0xDEADBEEF`:
 
 ```console
-$ crcforge solve --frames 010300000001840A 010300000002C40B 01030000000AC5CD 0106000100FF984A
-CRC Solver (frames)
-Frames           4 (length 8 bytes)
-Layouts tested   5
-
-Layout           16-bit checksum at the end, little-endian
-
-Catalog matches
-  Algorithm      Type  Parameters
-  ─────────────  ────  ────────────────────────────────────────────────────────────
-  crc-16-modbus  CRC   poly=0x8005 init=0xFFFF refin=true refout=true xorout=0x0000
+$ crcforge forge crc-32 "hello world" 0xDEADBEEF
+Forge
+Algorithm        crc-32  poly=0x04C11DB7 init=0xFFFFFFFF refin=true refout=true xorout=0xFFFFFFFF (32-bit)
+Data             plain-text, 11 bytes
+Target           0xDEADBEEF
+Patch            46 C9 6E 0B (inserted at offset 11)
+Forged data      68 65 6C 6C 6F 20 77 6F 72 6C 64 46 C9 6E 0B
+Verified         0xDEADBEEF == target
 ```
 
-The checksum isn't from any catalog? `solve` derives the parameters. These four samples come from a made-up CRC:
+## Finding an unknown CRC with `solve`
+
+Use `solve` when you have a few messages with their checksums but don't know the algorithm. Write each sample as `DATA:CHECKSUM`:
 
 ```console
 $ crcforge solve PING:0x3197 PONG:0x16A1 PUSH:0x4524 STATUS:0x7CB4
@@ -86,84 +83,106 @@ RevEng spec      width=16 poly=0x3d65 init=0x1234 refin=false refout=false xorou
 note: Polynomials divisible by (x+1) have equivalent init/xorout pairs; all listed pairs are correct.
 ```
 
-Make data produce the CRC you want:
+None of the known algorithms fit these samples, so `solve` worked out the parameters itself. It goes like this:
+
+1. It checks every known algorithm first.
+2. Samples of the same length give the polynomial (PING, PONG and PUSH here).
+3. A sample of a different length then fixes init and xorout (STATUS here).
+4. Simple sums and XOR checksums are tested too.
+
+Three or four samples are usually enough, as long as two of them have the same length. With fewer samples many algorithms fit by chance and CRCForge warns you. Rows marked "equivalent" give the same CRC values, so any of them works.
+
+If the checksum is stored inside each message, pass the whole frames with `--frames`:
 
 ```console
-$ crcforge forge crc-32 "hello world" 0xDEADBEEF
-Forge
-Algorithm        crc-32  poly=0x04C11DB7 init=0xFFFFFFFF refin=true refout=true xorout=0xFFFFFFFF (32-bit)
-Data             plain-text, 11 bytes
-Target           0xDEADBEEF
-Patch            46 C9 6E 0B (inserted at offset 11)
-Forged data      68 65 6C 6C 6F 20 77 6F 72 6C 64 46 C9 6E 0B
-Verified         0xDEADBEEF == target
+$ crcforge solve --frames 010300000001840A 010300000002C40B 01030000000AC5CD 0106000100FF984A
+CRC Solver (frames)
+Frames           4 (length 8 bytes)
+Layouts tested   5
+
+Layout           16-bit checksum at the end, little-endian
+
+Catalog matches
+  Algorithm      Type  Parameters
+  ─────────────  ────  ────────────────────────────────────────────────────────────
+  crc-16-modbus  CRC   poly=0x8005 init=0xFFFF refin=true refout=true xorout=0x0000
+```
+
+It tries 8, 16 and 32-bit checksums at the end of the frame in both byte orders. `--crc-at auto` also tries the start and `--skip auto` skips header bytes.
+
+Only have one message? Use `find`. If you know part of the algorithm, `brute` can search the rest:
+
+```bash
+crcforge brute 0x4B37 123456789 --width 16 --poly 0x8005
 ```
 
 ## Commands
 
 | Command | What it does |
 | --- | --- |
-| `calc` | Calculate a built-in algorithm, custom CRC parameters, a custom sum checksum, or every catalog entry at once (`--all`). |
-| `find` | Match one data/checksum pair against the catalog, including byte-swapped checksums. |
-| `solve` | Identify the algorithm behind several samples: catalog matches, derived CRC parameters, sum/XOR layouts. `--frames` locates the checksum inside frames. |
-| `brute` | Scan the catalog across every byte order, or search custom CRC parameters for a single sample. |
-| `verify` | Check that data and a checksum belong together; `--frame` reads the checksum from the data. |
-| `forge` | Insert or overwrite bytes so the data produces a target CRC or sum/XOR checksum. |
-| `records` | Validate every record of an Intel HEX or Motorola S-record file. |
-| `codegen` | Generate a table-driven implementation in C, Python or Rust. |
-| `info` | Show an algorithm's parameters, aliases, check value, residue and RevEng reference. |
-| `list` | List the catalog, filtered by `--width`, `--family` or `--search`. |
-| `transform` | Apply a byte-order transform and print the bytes. |
-| `self-test` | Verify every catalog entry against its published check value and residue. |
+| `calc` | Calculate a CRC or checksum, or all of them with `--all` |
+| `find` | Find which known algorithm matches a checksum |
+| `solve` | Work out the algorithm from several samples or frames |
+| `brute` | Try every byte order, or search CRC parameters for one sample |
+| `verify` | Check a checksum (`--frame` reads it from the data) |
+| `forge` | Patch data to get a chosen CRC or checksum |
+| `records` | Check an Intel HEX or S-record file |
+| `codegen` | Generate CRC code in C, Python or Rust |
+| `info` | Show the details of one algorithm |
+| `list` | List the algorithms (`--width`, `--family`, `--search`) |
+| `transform` | Reverse or swap the byte order of data |
+| `self-test` | Check every algorithm against its known check value |
 
-`crcforge <command> -h` (or `crcforge help <command>`) shows every option with examples. Mistyped commands and options get a clear error with a suggestion instead of a usage dump.
+`crcforge <command> -h` shows all options with examples.
 
-## Reverse-engineering a checksum
+## Input
 
-Start with the cheapest tool and move on when it comes up empty:
-
-1. **`find`**: one sample against the catalog. Add `--scan-byte-order` if the payload may be stored in another byte order.
-2. **`solve`**: several samples. Catalog CRCs are checked first, then the CRC parameters are derived:
-   - **Two or more samples of the same length** cancel init and xorout. The polynomial then follows directly from a GCD over GF(2), for any width. This is the approach RevEng uses.
-   - **Samples of different lengths** pin down init and xorout through a small linear system.
-   - Sum, one's/two's complement and XOR layouts are tested as well.
-3. **`solve --frames`**: when the checksum is stored inside each frame. CRCForge tries 8-, 16- and 32-bit checksums at the end (or `--crc-at auto` for the start too), in both byte orders, and with `--skip auto` it also skips header bytes.
-4. **`brute`**: one sample, but you know part of the answer (for example the polynomial). xorout (or init) is solved directly instead of scanned, so `--poly 0x8005 --init 0:0xFFFF` takes milliseconds. Large searches use every CPU core.
-
-Things worth knowing:
-
-- **One short sample proves little.** A 16-bit checksum has only 65,536 values, so a single sample matches many algorithms by chance. CRCForge warns when that is likely; a third sample usually settles it.
-- **Equivalent parameters exist.** When the polynomial is divisible by (x+1), every init/xorout pair has a "twin" that produces identical CRCs for every message. Both are listed and both are correct. With samples of only one length, init and xorout cannot be separated at all; CRCForge then shows the conventional choices.
-- **`--all-solutions`** lists every parameter set that fits instead of only the likely answer, and **`--json`** gives everything in machine-readable form.
-
-## Input rules
-
-CRCForge treats the payload (`data`) and the checksum as different kinds of input.
-
-| Payload | Meaning |
+| Data | Read as |
 | --- | --- |
-| `0xDEADBEEF`, `0xDE AD BE EF`, `0xDE_AD_BE_EF` | hex bytes (spaces and underscores are ignored) |
+| `0xDEADBEEF`, `0xDE AD BE EF` | hex bytes |
 | `0b01001000` | binary bytes |
-| `-` | raw bytes from stdin |
-| `firmware.bin --as-file` | raw bytes from a file |
-| anything else | UTF-8 text (`--as-text` forces this, even for values starting with `0x`) |
+| `-` | bytes from stdin |
+| `firmware.bin --as-file` | bytes from a file |
+| anything else | UTF-8 text (`--as-text` forces text) |
 
-Checksums are **decimal unless prefixed**: `19255`, `0x4B37` and `0b0100101100110111` are the same value, while `4B37` is rejected with a hint. The number of hex digits sets the default width (`0x0B37` is 16 bits).
+Checksums are decimal unless they start with `0x` or `0b`, so `19255` and `0x4B37` are the same value. `4B37` without a prefix is rejected.
 
-`--offset N`, `--length N` and `--exclude-tail N` select part of the data, for example to skip a header or leave out a stored checksum. In `solve`, samples are written `DATA:CHECKSUM`, and `@path` reads DATA from a file.
+`--offset`, `--length` and `--exclude-tail` cut out part of the data, for example a header or a stored checksum.
 
-## Byte order
-
-CRC mismatches often come from byte layout rather than the algorithm. CRCForge can transform the payload before calculating: `native`, `reverse` (whole stream), `swap16`, `swap32` or `swap64` (bytes inside each word). Separately, it checks whether the **checksum itself** is byte-swapped (`0x4B37` vs `0x374B`) and reports both cases separately as `[input:...]` and `[crc:...]`. Modes that cannot apply (a 9-byte input cannot be swapped in 16-bit words) or that produce the same bytes as another mode are skipped and reported once.
+A wrong result often comes from byte order rather than the algorithm. `--byte-order` changes the data first: `reverse` flips the whole stream and `swap16`, `swap32` and `swap64` swap the bytes inside each word. `find` and `solve` also check if the checksum itself is stored byte-swapped (`0x374B` instead of `0x4B37`).
 
 ## Python API
 
 ```python
 import crcforge
+```
 
-crcforge.calculate("crc-16-modbus", b"123456789")  # 0x4B37
-[a.name for a in crcforge.find(b"123456789", 0x4B37)]  # ['crc-16-modbus']
+| Function | Returns |
+| --- | --- |
+| `calculate(algorithm, data)` | the CRC or checksum as an `int` |
+| `find(data, checksum)` | the known algorithms that produce `checksum` |
+| `solve(samples, width)` | a `SolveResult` (see below) |
+| `forge(data, algorithm, target)` | a `ForgeResult`, the patched bytes are in `.data` |
+| `list_algorithms(width, family, search)` | the algorithms in the catalog |
+| `check_records(text)` | a `RecordReport` for Intel HEX or S-record text |
 
+`algorithm` is a name such as `"crc-32"` or an algorithm object:
+
+```python
+crcforge.calculate("crc-16-modbus", b"123456789")   # 0x4B37
+
+[a.name for a in crcforge.find(b"123456789", 0x4B37)]   # ['crc-16-modbus']
+
+patched = crcforge.forge(b"hello world", "crc-32", 0xDEADBEEF).data
+crcforge.calculate("crc-32", patched)   # 0xDEADBEEF
+
+my_crc = crcforge.CrcAlgorithm("my-crc", 16, poly=0x1021, init=0xFFFF, xor_out=0, refin=False, refout=False)
+crcforge.calculate(my_crc, b"123456789")   # 0x29B1
+```
+
+`solve` takes a list of `Sample(data, checksum)` and the checksum width in bits:
+
+```python
 samples = [
     crcforge.Sample(b"PING", 0x3197),
     crcforge.Sample(b"PONG", 0x16A1),
@@ -171,40 +190,45 @@ samples = [
     crcforge.Sample(b"STATUS", 0x7CB4),
 ]
 result = crcforge.solve(samples, width=16)
-print(result.crc_matches[0].algorithm.reveng_spec())
-# width=16 poly=0x3d65 init=0x1234 refin=false refout=false xorout=0x0f0f
 
-patched = crcforge.forge(b"hello world", "crc-32", 0xDEADBEEF).data
-custom = crcforge.CrcAlgorithm("mine", 16, poly=0x1021, init=0xFFFF, xor_out=0, refin=False, refout=False)
-crcforge.calculate(custom, b"123456789")  # 0x29B1
+result.found              # True if anything fits
+result.catalog_matches    # known algorithms that fit
+result.crc_matches        # CRC parameters worked out from the samples
+result.checksum_matches   # sums and XOR checksums that fit
+result.notes              # warnings, for example when there are too few samples
+
+crc = result.crc_matches[0].algorithm   # a CrcAlgorithm
+crc.poly, crc.init, crc.xor_out         # 0x3D65, 0x1234, 0x0F0F
+crc.reveng_spec()                       # 'width=16 poly=0x3d65 init=0x1234 refin=false refout=false xorout=0x0f0f'
+crcforge.calculate(crc, b"PING")        # 0x3197
 ```
 
-CRC parameters follow RevEng notation, including `init` for reflected CRCs, so values copied from the RevEng catalogue work as-is.
+Each match also has `input_mode` and `crc_mode`, which tell you if the data or the checksum had to be byte-swapped. Parameters use RevEng notation, so values from the RevEng catalogue work as they are. More in the [Python API docs](https://kayranfatih.github.io/crcforge/python-api/).
 
 ## Scripting
 
-Every command accepts `--json` (structured output) and `-q/--quiet` (just the result). The flags can go before or after the command. Errors go to stderr, with a hint when there is an obvious fix.
+`--json` prints JSON and `-q` prints only the result. Both work before or after the command name. Errors go to stderr.
 
 | Exit code | Meaning |
 | --- | --- |
-| 0 | success: a match was found, or the checksum is valid |
-| 1 | no match, invalid checksum, or a broken record file |
-| 2 | usage or input error |
-| 130 | interrupted (Ctrl+C); long searches print what they found so far |
+| 0 | match found or checksum valid |
+| 1 | no match, invalid checksum or a broken record file |
+| 2 | wrong usage or bad input |
+| 130 | stopped with Ctrl+C (long searches print what they found so far) |
 
-## Documentation
+## Docs
 
-The full guide lives in [`docs/`](https://github.com/kayranfatih/crcforge/tree/main/docs) and on the [documentation site](https://kayranfatih.github.io/crcforge/): concepts, a reverse-engineering walkthrough, forging, every command, the Python API and the [algorithm list](https://github.com/kayranfatih/crcforge/blob/main/docs/algorithms.md). See [CHANGELOG.md](https://github.com/kayranfatih/crcforge/blob/main/CHANGELOG.md) for what changed in each release.
+Full docs are on the [documentation site](https://kayranfatih.github.io/crcforge/) and in [`docs/`](https://github.com/kayranfatih/crcforge/tree/main/docs). Changes per release are in [CHANGELOG.md](https://github.com/kayranfatih/crcforge/blob/main/CHANGELOG.md).
 
 ## Development
 
 ```bash
 python -m pip install -e . -r requirements-dev.txt
-python -m pytest                 # tests (python -m unittest discover -s tests also works, without pytest)
+python -m pytest
 ruff check . && ruff format --check . && mypy
 ```
 
-[CONTRIBUTING.md](https://github.com/kayranfatih/crcforge/blob/main/CONTRIBUTING.md) covers the catalog sync script, the docs and the release process.
+See [CONTRIBUTING.md](https://github.com/kayranfatih/crcforge/blob/main/CONTRIBUTING.md) for the catalog sync script, the docs and releases.
 
 ## Credits
 

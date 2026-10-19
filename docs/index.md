@@ -1,15 +1,15 @@
 # CRCForge
 
-**CRCForge** is a Swiss Army knife for CRCs and checksums, built for reverse engineers, protocol analysts and firmware researchers. It answers the question "I have bytes and a checksum: how was it made?", even when the algorithm is not in any catalog.
+**CRCForge** is a Swiss Army knife for CRCs and checksums, built for reverse engineers, protocol analysts and firmware researchers. Give it some data and its checksum and it checks 134 known algorithms. If none of them match, it can work out the CRC parameters from a few samples.
 
 <div class="grid" markdown>
 
-- **134 built-in algorithms**: the complete RevEng CRC catalogue plus sum, complement, XOR, Fletcher, Adler and BSD/SysV checksums, all verified.
-- **Parameter solver**: derives poly, init, xorout, refin and refout from a few samples, for any width.
-- **Frame analysis**: locates the checksum inside captured frames.
-- **Forge**: makes data produce the CRC or checksum you choose.
-- **Records and code**: validates Intel HEX/S-record files, and generates C, Python and Rust implementations.
-- **Scriptable**: `--json`, `--quiet`, exit codes, a Python API, no dependencies.
+- **134 algorithms**: all RevEng CRCs plus sum, complement, XOR, Fletcher, Adler and BSD/SysV checksums
+- **Solver**: works out poly, init, xorout and reflection from a few samples
+- **Frames**: finds the checksum inside captured frames
+- **Forge**: patches data to get the CRC or checksum you want
+- **Records and code**: checks Intel HEX and S-record files and generates C, Python and Rust code
+- **Scripting**: `--json`, `-q`, exit codes, a Python API and no dependencies
 
 </div>
 
@@ -19,7 +19,7 @@
 pipx install crcforge
 ```
 
-or `python -m pip install crcforge`. Python 3.10+ is required; there are no third-party dependencies. To run the latest code: `pipx install git+https://github.com/kayranfatih/crcforge`.
+`pip install crcforge` works too. CRCForge needs Python 3.10 or newer. For the latest code: `pipx install git+https://github.com/kayranfatih/crcforge`.
 
 ## A first session
 
@@ -38,13 +38,13 @@ $ crcforge solve PING:0x3197 PONG:0x16A1 PUSH:0x4524 STATUS:0x7CB4 -q
 width=16 poly=0x3d65 init=0x1234 refin=false refout=false xorout=0x0f0f
 ```
 
-The last command recovers a CRC that is in no catalog from four short samples.
+The last command finds a CRC that isn't in any catalog from four short samples.
 
 ## Where to go next
 
-- [Concepts](guide/concepts.md): how CRCForge reads data and checksums, byte order, and parameter notation.
-- [Reverse-engineering a checksum](guide/reverse-engineering.md): the step-by-step workflow and how the solver works.
-- [Forging](guide/forging.md): making data hit a target checksum.
+- [Concepts](guide/concepts.md): how data and checksums are read, byte order and parameter notation.
+- [Reverse-engineering a checksum](guide/reverse-engineering.md): the workflow and how the solver works.
+- [Forging](guide/forging.md): patching data to get a target checksum.
 - [Command reference](commands.md): every command and option.
 - [Python API](python-api.md): use CRCForge from your own code.
 - [Algorithms](algorithms.md): the full catalog.
