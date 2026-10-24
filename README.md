@@ -169,15 +169,15 @@ import crcforge
 `algorithm` is a name such as `"crc-32"` or an algorithm object:
 
 ```python
-crcforge.calculate("crc-16-modbus", b"123456789")   # 0x4B37
+crcforge.calculate("crc-16-modbus", b"123456789")  # 0x4B37
 
-[a.name for a in crcforge.find(b"123456789", 0x4B37)]   # ['crc-16-modbus']
+[a.name for a in crcforge.find(b"123456789", 0x4B37)]  # ['crc-16-modbus']
 
 patched = crcforge.forge(b"hello world", "crc-32", 0xDEADBEEF).data
-crcforge.calculate("crc-32", patched)   # 0xDEADBEEF
+crcforge.calculate("crc-32", patched)  # 0xDEADBEEF
 
 my_crc = crcforge.CrcAlgorithm("my-crc", 16, poly=0x1021, init=0xFFFF, xor_out=0, refin=False, refout=False)
-crcforge.calculate(my_crc, b"123456789")   # 0x29B1
+crcforge.calculate(my_crc, b"123456789")  # 0x29B1
 ```
 
 `solve` takes a list of `Sample(data, checksum)` and the checksum width in bits:
@@ -191,16 +191,16 @@ samples = [
 ]
 result = crcforge.solve(samples, width=16)
 
-result.found              # True if anything fits
-result.catalog_matches    # known algorithms that fit
-result.crc_matches        # CRC parameters worked out from the samples
-result.checksum_matches   # sums and XOR checksums that fit
-result.notes              # warnings, for example when there are too few samples
+result.found  # True if anything fits
+result.catalog_matches  # known algorithms that fit
+result.crc_matches  # CRC parameters worked out from the samples
+result.checksum_matches  # sums and XOR checksums that fit
+result.notes  # warnings, for example when there are too few samples
 
-crc = result.crc_matches[0].algorithm   # a CrcAlgorithm
-crc.poly, crc.init, crc.xor_out         # 0x3D65, 0x1234, 0x0F0F
-crc.reveng_spec()                       # 'width=16 poly=0x3d65 init=0x1234 refin=false refout=false xorout=0x0f0f'
-crcforge.calculate(crc, b"PING")        # 0x3197
+crc = result.crc_matches[0].algorithm  # a CrcAlgorithm
+crc.poly, crc.init, crc.xor_out  # 0x3D65, 0x1234, 0x0F0F
+crc.reveng_spec()  # 'width=16 poly=0x3d65 init=0x1234 refin=false refout=false xorout=0x0f0f'
+crcforge.calculate(crc, b"PING")  # 0x3197
 ```
 
 Each match also has `input_mode` and `crc_mode`, which tell you if the data or the checksum had to be byte-swapped. Parameters use RevEng notation, so values from the RevEng catalogue work as they are. More in the [Python API docs](https://kayranfatih.github.io/crcforge/python-api/).
